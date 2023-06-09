@@ -36,6 +36,7 @@ class CreateResource(DirectServeJsonResource):
         self.media_repo = media_repo
         self.clock = hs.get_clock()
         self.auth = hs.get_auth()
+        self.max_pending_media_uploads = hs.config.media.max_pending_media_uploads
 
         # A rate limiter for creating new media IDs.
         self._create_media_rate_limiter = Ratelimiter(
@@ -59,6 +60,19 @@ class CreateResource(DirectServeJsonResource):
             time_now_s = self.clock.time()
             raise LimitExceededError(
                 retry_after_ms=int(1000 * (time_allowed - time_now_s))
+            )
+
+        (
+            reached_pending_limit,
+            first_expiration_ts,
+        ) = await self.media_repo.reached_pending_media_limit(
+            requester.user, self.max_pending_media_uploads
+        )
+        if reached_pending_limit:
+            raise LimitExceededError(
+                msg="You have too many uploads pending. Please finish uploading your "
+                "existing files.",
+                retry_after_ms=first_expiration_ts - self.clock.time_msec(),
             )
 
         content_uri, unused_expires_at = await self.media_repo.create_media_id(
