@@ -1807,63 +1807,6 @@ class ShutdownRoomResponse(TypedDict):
     new_room_id: Optional[str]
 
 
-@attr.s(slots=True, auto_attribs=True)
-class DeleteStatus:
-    """Object tracking the status of a delete room request
-
-    This class contains information on the progress of a delete room request, for
-    return by get_delete_status.
-    """
-
-    ACTION_SHUTDOWN = "shutdown"
-    ACTION_PURGE = "purge"
-    ACTION_PURGE_HISTORY = "purge_history"
-
-    # Scheduled delete waiting to be launch at a specific time
-    STATUS_SCHEDULED = "scheduled"
-    STATUS_SHUTTING_DOWN = "shutting_down"
-    STATUS_PURGING = "purging"
-    STATUS_COMPLETE = "complete"
-    STATUS_FAILED = "failed"
-
-    delete_id: str = ""
-
-    action: str = ACTION_PURGE
-
-    # Tracks whether this request has completed.
-    # One of STATUS_{PURGING,COMPLETE,FAILED,SHUTTING_DOWN,WAIT_PURGE}.
-    status: str = STATUS_PURGING
-
-    # Save the error message if an error occurs
-    error: str = ""
-
-    # Saves the result of an action to give it back to REST API
-    shutdown_room: ShutdownRoomResponse = {
-        "kicked_users": [],
-        "failed_to_kick_users": [],
-        "local_aliases": [],
-        "new_room_id": None,
-    }
-
-    def asdict(self, use_purge_history_format: bool = False) -> JsonDict:
-        if not use_purge_history_format:
-            ret = {
-                "delete_id": self.delete_id,
-                "status": self.status,
-                "shutdown_room": self.shutdown_room,
-            }
-        else:
-            ret = {
-                "status": self.status
-                if self.status == DeleteStatus.STATUS_COMPLETE
-                or self.status == DeleteStatus.STATUS_FAILED
-                else "active",
-            }
-        if self.error:
-            ret["error"] = self.error
-        return ret
-
-
 class RoomShutdownHandler:
     DEFAULT_MESSAGE = (
         "Sharing illegal content on this server is not permitted and rooms in"
