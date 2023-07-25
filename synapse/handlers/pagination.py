@@ -206,23 +206,19 @@ class PaginationHandler:
             (stream, topo, _event_id) = r
             token = "t%d-%d" % (topo, stream)
 
-            purge_id = random_string(16)
-
             logger.info(
-                "Starting purging events in room %s (purge_id %s)" % (room_id, purge_id)
+                "Starting purging events in room %s" % (room_id)
             )
 
             # We want to purge everything, including local events, and to run the purge in
             # the background so that it's not blocking any other operation apart from
             # other purges in the same room.
             run_as_background_process(
-                "_purge_history",
-                self._purge_history,
-                purge_id,
+                "purge_history",
+                self.purge_history,
                 room_id,
                 token,
                 True,
-                False,
             )
 
     async def start_purge_history(
