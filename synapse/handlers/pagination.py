@@ -256,6 +256,9 @@ class PaginationHandler:
         task: ScheduledTask,
         first_launch: bool,
     ) -> Tuple[TaskStatus, Optional[JsonMapping], Optional[str]]:
+        """
+        Scheduler action to purge some history of a room.
+        """
         if (
             task.resource_id is None
             or task.params is None
@@ -332,6 +335,9 @@ class PaginationHandler:
         task: ScheduledTask,
         first_launch: bool,
     ) -> Tuple[TaskStatus, Optional[JsonMapping], Optional[str]]:
+        """
+        Scheduler action to purge a room.
+        """
         if not task.resource_id:
             raise Exception("No room id passed to purge_room task")
         params = task.params if task.params else {}
@@ -650,17 +656,7 @@ class PaginationHandler:
         first_launch: bool,
     ) -> Tuple[TaskStatus, Optional[JsonMapping], Optional[str]]:
         """
-        Shuts down and purges a room.
-
-        See `RoomShutdownHandler.shutdown_room` for details of creation of the new room
-
-        Args:
-            delete_id: The ID for this delete.
-            room_id: The ID of the room to shut down.
-            shutdown_params: parameters for the shutdown, cf `RoomShutdownHandler.ShutdownRoomParams`
-            shutdown_response: current status of the shutdown, if it was interrupted
-
-        Keeps track of the `DeleteStatus` (and `ShutdownRoomResponse`) in `self._delete_by_id` and persisted in DB
+        Scheduler action to shutdown and purge a room.
         """
         if task.resource_id is None or task.params is None:
             raise Exception(
