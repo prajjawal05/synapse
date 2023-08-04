@@ -20,6 +20,16 @@ from synapse.api.constants import PresenceState
 from synapse.types import JsonDict
 
 
+@attr.s(slots=True, auto_attribs=True)
+class UserDevicePresenceState:
+    user_id: str
+    device_id: Optional[str]
+    state: str
+    last_active_ts: int
+    last_user_sync_ts: int
+    status_msg: Optional[str]
+
+
 @attr.s(slots=True, frozen=True, auto_attribs=True)
 class UserPresenceState:
     """Represents the current presence state of the user.

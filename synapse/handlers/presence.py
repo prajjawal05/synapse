@@ -49,7 +49,7 @@ from typing_extensions import ContextManager
 import synapse.metrics
 from synapse.api.constants import EduTypes, EventTypes, Membership, PresenceState
 from synapse.api.errors import SynapseError
-from synapse.api.presence import UserPresenceState
+from synapse.api.presence import UserDevicePresenceState, UserPresenceState
 from synapse.appservice import ApplicationService
 from synapse.events.presence_router import PresenceRouter
 from synapse.logging.context import run_in_background
@@ -150,11 +150,16 @@ class BasePresenceHandler(abc.ABC):
         self._busy_presence_enabled = hs.config.experimental.msc3026_enabled
 
         active_presence = self.store.take_presence_startup_info()
+        # The combine status across all user devices.
         self.user_to_current_state = {state.user_id: state for state in active_presence}
 
     @abc.abstractmethod
     async def user_syncing(
-        self, user_id: str, affect_presence: bool, presence_state: str
+        self,
+        user_id: str,
+        device_id: Optional[str],
+        affect_presence: bool,
+        presence_state: str,
     ) -> ContextManager[None]:
         """Returns a context manager that should surround any stream requests
         from the user.
@@ -241,6 +246,7 @@ class BasePresenceHandler(abc.ABC):
     async def set_state(
         self,
         target_user: UserID,
+        device_id: Optional[str],
         state: JsonDict,
         ignore_status_msg: bool = False,
         force_notify: bool = False,
@@ -368,7 +374,9 @@ class BasePresenceHandler(abc.ABC):
         # We set force_notify=True here so that this presence update is guaranteed to
         # increment the presence stream ID (which resending the current user's presence
         # otherwise would not do).
-        await self.set_state(UserID.from_string(user_id), state, force_notify=True)
+        await self.set_state(
+            UserID.from_string(user_id), None, state, force_notify=True
+        )
 
     async def is_visible(self, observed_user: UserID, observer_user: UserID) -> bool:
         raise NotImplementedError(
@@ -472,7 +480,11 @@ class WorkerPresenceHandler(BasePresenceHandler):
                 self.send_user_sync(user_id, False, last_sync_ms)
 
     async def user_syncing(
-        self, user_id: str, affect_presence: bool, presence_state: str
+        self,
+        user_id: str,
+        device_id: Optional[str],
+        affect_presence: bool,
+        presence_state: str,
     ) -> ContextManager[None]:
         """Record that a user is syncing.
 
@@ -490,7 +502,10 @@ class WorkerPresenceHandler(BasePresenceHandler):
             # what the spec wants: see comment in the BasePresenceHandler version
             # of this function.
             await self.set_state(
-                UserID.from_string(user_id), {"presence": presence_state}, True
+                UserID.from_string(user_id),
+                device_id,
+                {"presence": presence_state},
+                True,
             )
 
         curr_sync = self._user_to_num_current_syncs.get(user_id, 0)
@@ -586,6 +601,7 @@ class WorkerPresenceHandler(BasePresenceHandler):
     async def set_state(
         self,
         target_user: UserID,
+        device_id: Optional[str],
         state: JsonDict,
         ignore_status_msg: bool = False,
         force_notify: bool = False,
@@ -623,6 +639,7 @@ class WorkerPresenceHandler(BasePresenceHandler):
         await self._set_state_client(
             instance_name=self._presence_writer_instance,
             user_id=user_id,
+            device_id=device_id,
             state=state,
             ignore_status_msg=ignore_status_msg,
             force_notify=force_notify,
@@ -754,6 +771,11 @@ class PresenceHandler(BasePresenceHandler):
         # stream from the current state when we restart.
         self._event_pos = self.store.get_room_max_stream_ordering()
         self._event_processing = False
+
+        # The per-device presence state, maps user to devices to per-device presence state.
+        self.user_to_device_to_current_state: Dict[
+            str, Dict[Optional[str], UserDevicePresenceState]
+        ] = {}
 
     async def _on_shutdown(self) -> None:
         """Gets called when shutting down. This lets us persist any updates that
@@ -973,6 +995,7 @@ class PresenceHandler(BasePresenceHandler):
     async def user_syncing(
         self,
         user_id: str,
+        device_id: Optional[str],
         affect_presence: bool = True,
         presence_state: str = PresenceState.ONLINE,
     ) -> ContextManager[None]:
@@ -985,6 +1008,7 @@ class PresenceHandler(BasePresenceHandler):
 
         Args:
             user_id
+            device_id
             affect_presence: If false this function will be a no-op.
                 Useful for streams that are not associated with an actual
                 client that is being used by a user.
@@ -1010,7 +1034,10 @@ class PresenceHandler(BasePresenceHandler):
                 # updated always, which is not what the spec calls for, but synapse has done
                 # this for... forever, I think.
                 await self.set_state(
-                    UserID.from_string(user_id), {"presence": presence_state}, True
+                    UserID.from_string(user_id),
+                    device_id,
+                    {"presence": presence_state},
+                    True,
                 )
                 # Retrieve the new state for the logic below. This should come from the
                 # in-memory cache.
@@ -1213,6 +1240,7 @@ class PresenceHandler(BasePresenceHandler):
     async def set_state(
         self,
         target_user: UserID,
+        device_id: Optional[str],
         state: JsonDict,
         ignore_status_msg: bool = False,
         force_notify: bool = False,
@@ -1221,6 +1249,7 @@ class PresenceHandler(BasePresenceHandler):
 
         Args:
             target_user: The ID of the user to set the presence state of.
+            device_id: The optional device ID.
             state: The presence state as a JSON dictionary.
             ignore_status_msg: True to ignore the "status_msg" field of the `state` dict.
                 If False, the user's current status will be updated.
@@ -1249,6 +1278,41 @@ class PresenceHandler(BasePresenceHandler):
 
         prev_state = await self.current_state_for_user(user_id)
 
+        # Always update the device specific information.
+        device_state = self.user_to_device_to_current_state.setdefault(
+            user_id, {}
+        ).setdefault(
+            device_id,
+            UserDevicePresenceState(
+                user_id,
+                device_id,
+                presence,
+                last_active_ts=self.clock.time_msec(),
+                last_user_sync_ts=self.clock.time_msec(),
+                status_msg=None,
+            ),
+        )
+        device_state.state = presence
+        if presence:
+            device_state.status_msg = status_msg
+        device_state.last_active_ts = self.clock.time_msec()
+        device_state.last_user_sync_ts = self.clock.time_msec()
+
+        # Based on (all) the user's devices calculate the new presence state.
+        presence_by_priority = {
+            PresenceState.BUSY: 4,
+            PresenceState.ONLINE: 3,
+            PresenceState.UNAVAILABLE: 2,
+            PresenceState.OFFLINE: 1,
+        }
+        for device_state in self.user_to_device_to_current_state[user_id].values():
+            if (
+                presence_by_priority[device_state.state]
+                > presence_by_priority[presence]
+            ):
+                presence = device_state.state
+
+        # The newly updated status as an amalgamation of all the device statuses.
         new_fields = {"state": presence}
 
         if not ignore_status_msg:
@@ -1962,6 +2026,7 @@ def handle_update(
     # If the users are ours then we want to set up a bunch of timers
     # to time things out.
     if is_mine:
+        # TODO Maybe don't do this if currently active?
         if new_state.state == PresenceState.ONLINE:
             # Idle timer
             wheel_timer.insert(

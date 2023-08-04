@@ -559,7 +559,7 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
 
         # Mark user as online
         self._set_presencestate_with_status_msg(
-            user_id, PresenceState.ONLINE, status_msg
+            user_id, None, PresenceState.ONLINE, status_msg
         )
 
         # Check that if we wait a while without telling the handler the user has
@@ -591,13 +591,13 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
 
         # Mark user as online
         self._set_presencestate_with_status_msg(
-            user_id, PresenceState.ONLINE, status_msg
+            user_id, None, PresenceState.ONLINE, status_msg
         )
 
         # Mark user as offline
         self.get_success(
             self.presence_handler.set_state(
-                UserID.from_string(user_id), {"presence": PresenceState.OFFLINE}
+                UserID.from_string(user_id), None, {"presence": PresenceState.OFFLINE}
             )
         )
 
@@ -616,12 +616,12 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
 
         # Mark user as online
         self._set_presencestate_with_status_msg(
-            user_id, PresenceState.ONLINE, status_msg
+            user_id, None, PresenceState.ONLINE, status_msg
         )
 
         # Mark user as offline
         self._set_presencestate_with_status_msg(
-            user_id, PresenceState.OFFLINE, "And now here."
+            user_id, None, PresenceState.OFFLINE, "And now here."
         )
 
     def test_user_reset_online_with_no_status(self) -> None:
@@ -633,13 +633,13 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
 
         # Mark user as online
         self._set_presencestate_with_status_msg(
-            user_id, PresenceState.ONLINE, status_msg
+            user_id, None, PresenceState.ONLINE, status_msg
         )
 
         # Mark user as online again
         self.get_success(
             self.presence_handler.set_state(
-                UserID.from_string(user_id), {"presence": PresenceState.ONLINE}
+                UserID.from_string(user_id), None, {"presence": PresenceState.ONLINE}
             )
         )
 
@@ -659,11 +659,13 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
 
         # Mark user as online
         self._set_presencestate_with_status_msg(
-            user_id, PresenceState.ONLINE, status_msg
+            user_id, None, PresenceState.ONLINE, status_msg
         )
 
         # Mark user as online and `status_msg = None`
-        self._set_presencestate_with_status_msg(user_id, PresenceState.ONLINE, None)
+        self._set_presencestate_with_status_msg(
+            user_id, None, PresenceState.ONLINE, None
+        )
 
     def test_set_presence_from_syncing_not_set(self) -> None:
         """Test that presence is not set by syncing if affect_presence is false"""
@@ -671,11 +673,13 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
         status_msg = "I'm here!"
 
         self._set_presencestate_with_status_msg(
-            user_id, PresenceState.UNAVAILABLE, status_msg
+            user_id, None, PresenceState.UNAVAILABLE, status_msg
         )
 
         self.get_success(
-            self.presence_handler.user_syncing(user_id, False, PresenceState.ONLINE)
+            self.presence_handler.user_syncing(
+                user_id, None, False, PresenceState.ONLINE
+            )
         )
 
         state = self.get_success(
@@ -692,11 +696,35 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
         status_msg = "I'm here!"
 
         self._set_presencestate_with_status_msg(
-            user_id, PresenceState.UNAVAILABLE, status_msg
+            user_id, None, PresenceState.UNAVAILABLE, status_msg
         )
 
         self.get_success(
-            self.presence_handler.user_syncing(user_id, True, PresenceState.ONLINE)
+            self.presence_handler.user_syncing(
+                user_id, None, True, PresenceState.ONLINE
+            )
+        )
+
+        state = self.get_success(
+            self.presence_handler.get_state(UserID.from_string(user_id))
+        )
+        # we should now be online
+        self.assertEqual(state.state, PresenceState.ONLINE)
+
+    def test_set_presence_from_syncing_multi_device(self) -> None:
+        """Test that presence is set to the highest priority of all devices."""
+        user_id = "@test:server"
+
+        self.get_success(
+            self.presence_handler.user_syncing(
+                user_id, "dev-1", True, PresenceState.ONLINE
+            )
+        )
+
+        self.get_success(
+            self.presence_handler.user_syncing(
+                user_id, "dev-2", True, PresenceState.UNAVAILABLE
+            )
         )
 
         state = self.get_success(
@@ -711,11 +739,13 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
         status_msg = "I'm here!"
 
         self._set_presencestate_with_status_msg(
-            user_id, PresenceState.UNAVAILABLE, status_msg
+            user_id, None, PresenceState.UNAVAILABLE, status_msg
         )
 
         self.get_success(
-            self.presence_handler.user_syncing(user_id, True, PresenceState.ONLINE)
+            self.presence_handler.user_syncing(
+                user_id, None, True, PresenceState.ONLINE
+            )
         )
 
         state = self.get_success(
@@ -755,14 +785,16 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
             )
 
         # Set presence to BUSY
-        self._set_presencestate_with_status_msg(user_id, PresenceState.BUSY, status_msg)
+        self._set_presencestate_with_status_msg(
+            user_id, None, PresenceState.BUSY, status_msg
+        )
 
         # Perform a sync with a presence state other than busy. This should NOT change
         # our presence status; we only change from busy if we explicitly set it via
         # /presence/*.
         self.get_success(
             worker_to_sync_against.get_presence_handler().user_syncing(
-                user_id, True, PresenceState.ONLINE
+                user_id, None, True, PresenceState.ONLINE
             )
         )
 
@@ -774,18 +806,24 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
         self.assertEqual(state.state, PresenceState.BUSY)
 
     def _set_presencestate_with_status_msg(
-        self, user_id: str, state: str, status_msg: Optional[str]
+        self,
+        user_id: str,
+        device_id: Optional[str],
+        state: str,
+        status_msg: Optional[str],
     ) -> None:
         """Set a PresenceState and status_msg and check the result.
 
         Args:
             user_id: User for that the status is to be set.
+            device_id:
             state: The new PresenceState.
             status_msg: Status message that is to be set.
         """
         self.get_success(
             self.presence_handler.set_state(
                 UserID.from_string(user_id),
+                device_id,
                 {"presence": state, "status_msg": status_msg},
             )
         )
@@ -1032,7 +1070,9 @@ class PresenceJoinTestCase(unittest.HomeserverTestCase):
         # Mark test2 as online, test will be offline with a last_active of 0
         self.get_success(
             self.presence_handler.set_state(
-                UserID.from_string("@test2:server"), {"presence": PresenceState.ONLINE}
+                UserID.from_string("@test2:server"),
+                None,
+                {"presence": PresenceState.ONLINE},
             )
         )
         self.reactor.pump([0])  # Wait for presence updates to be handled
@@ -1079,7 +1119,9 @@ class PresenceJoinTestCase(unittest.HomeserverTestCase):
         # Mark test as online
         self.get_success(
             self.presence_handler.set_state(
-                UserID.from_string("@test:server"), {"presence": PresenceState.ONLINE}
+                UserID.from_string("@test:server"),
+                None,
+                {"presence": PresenceState.ONLINE},
             )
         )
 
@@ -1087,7 +1129,9 @@ class PresenceJoinTestCase(unittest.HomeserverTestCase):
         # Note we don't join them to the room yet
         self.get_success(
             self.presence_handler.set_state(
-                UserID.from_string("@test2:server"), {"presence": PresenceState.ONLINE}
+                UserID.from_string("@test2:server"),
+                None,
+                {"presence": PresenceState.ONLINE},
             )
         )
 

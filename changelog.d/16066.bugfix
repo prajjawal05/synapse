@@ -1,0 +1,2 @@
+Fix a long-standing bug where multi-device accounts could cause high load due to presence.
+
