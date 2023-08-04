@@ -948,6 +948,35 @@ class PresenceHandler(BasePresenceHandler):
             )
             self.external_process_last_updated_ms.pop(process_id)
 
+        # Check if any devices for these users should be discarded.
+        new_states = []
+        for user_id in users_to_check:
+            user_devices = self.user_to_device_to_current_state.get(user_id, {})
+            # Only keep the devices that have been seen recently.
+            new_user_devices = {
+                device_id: device
+                for device_id, device in user_devices.items()
+                if now - max(device.last_user_sync_ts, device.last_active_ts)
+                <= IDLE_TIMER
+            }
+
+            # If any device has timed out, ensure that the presence state and status msg
+            # is up-to-date.
+            if len(user_devices) != len(new_user_devices):
+                # Note that we don't need to worry about resetting other information as
+                # it will also be the most up-to-date anyway.
+                presence, status_msg = _combine_device_states(new_user_devices.values())
+
+                new_states.append(
+                    self.user_to_current_state.get(
+                        user_id, UserPresenceState.default(user_id)
+                    ).copy_and_replace(state=presence, status_msg=status_msg)
+                )
+
+                self.user_to_device_to_current_state[user_id] = new_user_devices
+        if new_states:
+            await self._update_states(new_states)
+
         states = [
             self.user_to_current_state.get(user_id, UserPresenceState.default(user_id))
             for user_id in users_to_check
@@ -1296,21 +1325,13 @@ class PresenceHandler(BasePresenceHandler):
         if presence:
             device_state.status_msg = status_msg
         device_state.last_active_ts = self.clock.time_msec()
+        # TODO This would get set for non-syncs (also see above).
         device_state.last_user_sync_ts = self.clock.time_msec()
 
         # Based on (all) the user's devices calculate the new presence state.
-        presence_by_priority = {
-            PresenceState.BUSY: 4,
-            PresenceState.ONLINE: 3,
-            PresenceState.UNAVAILABLE: 2,
-            PresenceState.OFFLINE: 1,
-        }
-        for device_state in self.user_to_device_to_current_state[user_id].values():
-            if (
-                presence_by_priority[device_state.state]
-                > presence_by_priority[presence]
-            ):
-                presence = device_state.state
+        presence, status_msg = _combine_device_states(
+            self.user_to_device_to_current_state[user_id].values()
+        )
 
         # The newly updated status as an amalgamation of all the device statuses.
         new_fields = {"state": presence}
@@ -2070,6 +2091,50 @@ def handle_update(
         persist_and_notify = True
 
     return new_state, persist_and_notify, federation_ping
+
+
+PRESENCE_BY_PRIORITY = {
+    PresenceState.BUSY: 4,
+    PresenceState.ONLINE: 3,
+    PresenceState.UNAVAILABLE: 2,
+    PresenceState.OFFLINE: 1,
+}
+
+
+def _combine_device_states(
+    device_states: Iterable[UserDevicePresenceState],
+) -> Tuple[str, Optional[str]]:
+    """
+    Find the device to use presence information from.
+
+    Orders devices by priority, then last_active_ts, then device ID.
+
+    Args:
+        device_states: An iterable of device presence states
+
+    Return:
+        A two-tuple of the combined presence information:
+
+        * The new presence state
+        * The new status message
+    """
+
+    # Based on (all) the user's devices calculate the new presence state.
+    presence = PresenceState.OFFLINE
+    last_active_ts = -1
+    status_msg = None
+
+    # Find the device to use presen priority device based on the presence priority, but tie-break with how recently the device has synced.
+    for device_state in device_states:
+        if (PRESENCE_BY_PRIORITY[device_state.state], device_state.last_active_ts) > (
+            PRESENCE_BY_PRIORITY[presence],
+            last_active_ts,
+        ):
+            presence = device_state.state
+            last_active_ts = device_state.last_active_ts
+            status_msg = device_state.status_msg
+
+    return presence, status_msg
 
 
 async def get_interested_parties(

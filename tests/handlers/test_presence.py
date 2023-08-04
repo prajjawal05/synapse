@@ -713,7 +713,9 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
 
     def test_set_presence_from_syncing_multi_device(self) -> None:
         """Test that presence is set to the highest priority of all devices."""
-        user_id = "@test:server"
+        user_id = f"@test:{self.hs.config.server.server_name}"
+
+        # Create 2 devices, the first is online, the second unavailable.
 
         self.get_success(
             self.presence_handler.user_syncing(
@@ -721,17 +723,32 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
             )
         )
 
+        # Add some time between syncs.
+        self.reactor.advance(10)
+        self.reactor.pump([0.1])
+
         self.get_success(
             self.presence_handler.user_syncing(
                 user_id, "dev-2", True, PresenceState.UNAVAILABLE
             )
         )
 
+        # Online should win.
         state = self.get_success(
             self.presence_handler.get_state(UserID.from_string(user_id))
         )
-        # we should now be online
         self.assertEqual(state.state, PresenceState.ONLINE)
+
+        # Advance such that the first device should be discarded, then pump so
+        # _handle_timeouts function to called.
+        self.reactor.advance(IDLE_TIMER / 1000 - 10)
+        self.reactor.pump([5])
+
+        # Unavailable.
+        state = self.get_success(
+            self.presence_handler.get_state(UserID.from_string(user_id))
+        )
+        self.assertEqual(state.state, PresenceState.UNAVAILABLE)
 
     def test_set_presence_from_syncing_keeps_status(self) -> None:
         """Test that presence set by syncing retains status message"""
