@@ -2104,7 +2104,7 @@ def _combine_device_states(
     """
     Find the device to use presence information from.
 
-    Orders devices by priority, then last_active_ts, then device ID.
+    Orders devices by priority, then last_active_ts.
 
     Args:
         device_states: An iterable of device presence states
