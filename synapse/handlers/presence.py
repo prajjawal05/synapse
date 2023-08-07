@@ -956,8 +956,7 @@ class PresenceHandler(BasePresenceHandler):
             new_user_devices = {
                 device_id: device
                 for device_id, device in user_devices.items()
-                if now - max(device.last_user_sync_ts, device.last_active_ts)
-                <= IDLE_TIMER
+                if now - device.last_active_ts <= IDLE_TIMER
             }
 
             # If any device has timed out, ensure that the presence state and status msg
@@ -1317,13 +1316,10 @@ class PresenceHandler(BasePresenceHandler):
                 device_id,
                 presence,
                 last_active_ts=self.clock.time_msec(),
-                last_user_sync_ts=self.clock.time_msec(),
             ),
         )
         device_state.state = presence
         device_state.last_active_ts = self.clock.time_msec()
-        # TODO This would get set for non-syncs (also see above).
-        device_state.last_user_sync_ts = self.clock.time_msec()
 
         # Based on (all) the user's devices calculate the new presence state.
         presence = _combine_device_states(

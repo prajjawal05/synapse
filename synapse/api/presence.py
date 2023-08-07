@@ -26,7 +26,6 @@ class UserDevicePresenceState:
     device_id: Optional[str]
     state: str
     last_active_ts: int
-    last_user_sync_ts: int
 
 
 @attr.s(slots=True, frozen=True, auto_attribs=True)
