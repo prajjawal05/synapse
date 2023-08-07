@@ -822,6 +822,17 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
         # we should still be busy
         self.assertEqual(state.state, PresenceState.BUSY)
 
+        # Advance such that the device would be discarded if it was not busy,
+        # then pump so _handle_timeouts function to called.
+        self.reactor.advance(IDLE_TIMER / 1000)
+        self.reactor.pump([5])
+
+        # The account should still be busy.
+        state = self.get_success(
+            self.presence_handler.get_state(UserID.from_string(user_id))
+        )
+        self.assertEqual(state.state, PresenceState.BUSY)
+
     def _set_presencestate_with_status_msg(
         self,
         user_id: str,

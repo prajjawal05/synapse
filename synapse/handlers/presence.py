@@ -952,11 +952,13 @@ class PresenceHandler(BasePresenceHandler):
         new_states = []
         for user_id in users_to_check:
             user_devices = self.user_to_device_to_current_state.get(user_id, {})
-            # Only keep the devices that have been seen recently.
+            # Only keep the devices that have been seen recently *unless* they're busy,
+            # which do not idle out.
             new_user_devices = {
                 device_id: device
                 for device_id, device in user_devices.items()
-                if now - device.last_active_ts <= IDLE_TIMER
+                if (device.state == PresenceState.BUSY and self._busy_presence_enabled)
+                or now - device.last_active_ts <= IDLE_TIMER
             }
 
             # If any device has timed out, ensure that the presence state and status msg
