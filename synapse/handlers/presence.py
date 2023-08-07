@@ -965,12 +965,12 @@ class PresenceHandler(BasePresenceHandler):
             if len(user_devices) != len(new_user_devices):
                 # Note that we don't need to worry about resetting other information as
                 # it will also be the most up-to-date anyway.
-                presence, status_msg = _combine_device_states(new_user_devices.values())
+                presence = _combine_device_states(new_user_devices.values())
 
                 new_states.append(
                     self.user_to_current_state.get(
                         user_id, UserPresenceState.default(user_id)
-                    ).copy_and_replace(state=presence, status_msg=status_msg)
+                    ).copy_and_replace(state=presence)
                 )
 
                 self.user_to_device_to_current_state[user_id] = new_user_devices
@@ -1318,18 +1318,15 @@ class PresenceHandler(BasePresenceHandler):
                 presence,
                 last_active_ts=self.clock.time_msec(),
                 last_user_sync_ts=self.clock.time_msec(),
-                status_msg=None,
             ),
         )
         device_state.state = presence
-        if presence:
-            device_state.status_msg = status_msg
         device_state.last_active_ts = self.clock.time_msec()
         # TODO This would get set for non-syncs (also see above).
         device_state.last_user_sync_ts = self.clock.time_msec()
 
         # Based on (all) the user's devices calculate the new presence state.
-        presence, status_msg = _combine_device_states(
+        presence = _combine_device_states(
             self.user_to_device_to_current_state[user_id].values()
         )
 
@@ -2103,7 +2100,7 @@ PRESENCE_BY_PRIORITY = {
 
 def _combine_device_states(
     device_states: Iterable[UserDevicePresenceState],
-) -> Tuple[str, Optional[str]]:
+) -> str:
     """
     Find the device to use presence information from.
 
@@ -2113,16 +2110,12 @@ def _combine_device_states(
         device_states: An iterable of device presence states
 
     Return:
-        A two-tuple of the combined presence information:
-
-        * The new presence state
-        * The new status message
+        The combined presence state.
     """
 
     # Based on (all) the user's devices calculate the new presence state.
     presence = PresenceState.OFFLINE
     last_active_ts = -1
-    status_msg = None
 
     # Find the device to use presen priority device based on the presence priority, but tie-break with how recently the device has synced.
     for device_state in device_states:
@@ -2132,9 +2125,8 @@ def _combine_device_states(
         ):
             presence = device_state.state
             last_active_ts = device_state.last_active_ts
-            status_msg = device_state.status_msg
 
-    return presence, status_msg
+    return presence
 
 
 async def get_interested_parties(
