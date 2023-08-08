@@ -2115,7 +2115,8 @@ def _combine_device_states(
     presence = PresenceState.OFFLINE
     last_active_ts = -1
 
-    # Find the device to use presen priority device based on the presence priority, but tie-break with how recently the device has synced.
+    # Find the device to use the presence state of based on the presence priority,
+    # but tie-break with how recently the device has been seen.
     for device_state in device_states:
         if (PRESENCE_BY_PRIORITY[device_state.state], device_state.last_active_ts) > (
             PRESENCE_BY_PRIORITY[presence],
