@@ -2042,7 +2042,6 @@ def handle_update(
     # If the users are ours then we want to set up a bunch of timers
     # to time things out.
     if is_mine:
-        # TODO Maybe don't do this if currently active?
         if new_state.state == PresenceState.ONLINE:
             # Idle timer
             wheel_timer.insert(
