@@ -504,8 +504,8 @@ class WorkerPresenceHandler(BasePresenceHandler):
             await self.set_state(
                 UserID.from_string(user_id),
                 device_id,
-                {"presence": presence_state},
-                True,
+                state={"presence": presence_state},
+                ignore_status_msg=True,
             )
 
         curr_sync = self._user_to_num_current_syncs.get(user_id, 0)
@@ -1066,8 +1066,8 @@ class PresenceHandler(BasePresenceHandler):
                 await self.set_state(
                     UserID.from_string(user_id),
                     device_id,
-                    {"presence": presence_state},
-                    True,
+                    state={"presence": presence_state},
+                    ignore_status_msg=True,
                 )
                 # Retrieve the new state for the logic below. This should come from the
                 # in-memory cache.
