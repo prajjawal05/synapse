@@ -1950,8 +1950,11 @@ def handle_timeout(
     user_id = state.user_id
 
     if is_mine:
+        print(f"Now: {now}")
+        print(f"Initial state: {state}")
         if state.state == PresenceState.ONLINE:
             if now - state.last_active_ts > IDLE_TIMER:
+                print("HIT IDLE TIMER")
                 # Currently online, but last activity ages ago so auto
                 # idle
                 state = state.copy_and_replace(state=PresenceState.UNAVAILABLE)
@@ -1973,6 +1976,7 @@ def handle_timeout(
             # don't set them as offline.
             sync_or_active = max(state.last_user_sync_ts, state.last_active_ts)
             if now - sync_or_active > SYNC_ONLINE_TIMEOUT:
+                print("HIT SYNC TIMEOUT")
                 state = state.copy_and_replace(state=PresenceState.OFFLINE)
                 changed = True
     else:

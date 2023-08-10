@@ -717,7 +717,8 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
         # * The presence state of device 1.
         # * The presence state of device 2.
         # * The expected user presence state after both devices have synced.
-        # * The expected user presence state after device 1 has timed out.
+        # * The expected user presence state after device 1 has idled.
+        # * The expected user presence state after device 2 has idled.
         [
             # If both devices have the same state, nothing exciting should happen.
             (
@@ -725,14 +726,17 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
                 PresenceState.ONLINE,
                 PresenceState.ONLINE,
                 PresenceState.ONLINE,
-            ),
-            (
-                PresenceState.UNAVAILABLE,
-                PresenceState.UNAVAILABLE,
-                PresenceState.UNAVAILABLE,
                 PresenceState.UNAVAILABLE,
             ),
             (
+                PresenceState.UNAVAILABLE,
+                PresenceState.UNAVAILABLE,
+                PresenceState.UNAVAILABLE,
+                PresenceState.UNAVAILABLE,
+                PresenceState.UNAVAILABLE,
+            ),
+            (
+                PresenceState.OFFLINE,
                 PresenceState.OFFLINE,
                 PresenceState.OFFLINE,
                 PresenceState.OFFLINE,
@@ -744,18 +748,21 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
                 PresenceState.UNAVAILABLE,
                 PresenceState.ONLINE,
                 PresenceState.UNAVAILABLE,
+                PresenceState.UNAVAILABLE,
             ),
             (
                 PresenceState.ONLINE,
                 PresenceState.OFFLINE,
                 PresenceState.ONLINE,
                 PresenceState.OFFLINE,
+                PresenceState.UNAVAILABLE,
             ),
             (
                 PresenceState.UNAVAILABLE,
                 PresenceState.OFFLINE,
                 PresenceState.UNAVAILABLE,
                 PresenceState.OFFLINE,
+                PresenceState.UNAVAILABLE,
             ),
             # If the second device has a "higher" state it should override.
             (
@@ -763,15 +770,18 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
                 PresenceState.ONLINE,
                 PresenceState.ONLINE,
                 PresenceState.ONLINE,
+                PresenceState.UNAVAILABLE,
             ),
             (
                 PresenceState.OFFLINE,
                 PresenceState.ONLINE,
                 PresenceState.ONLINE,
                 PresenceState.ONLINE,
+                PresenceState.UNAVAILABLE,
             ),
             (
                 PresenceState.OFFLINE,
+                PresenceState.UNAVAILABLE,
                 PresenceState.UNAVAILABLE,
                 PresenceState.UNAVAILABLE,
                 PresenceState.UNAVAILABLE,
@@ -784,6 +794,7 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
         dev_2_state: str,
         expected_state_1: str,
         expected_state_2: str,
+        expected_state_3: str,
     ) -> None:
         """
         Test the behaviour of multiple devices syncing at the same time.
@@ -842,13 +853,14 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
         # 7. Advance such that the second device should be discarded (half the idle timer),
         # then pump so _handle_timeouts function to called.
         self.reactor.advance(IDLE_TIMER / 1000 / 2)
-        self.reactor.pump([5])
+        self.reactor.pump([0.1])
 
-        # 8. There are no more devices, should be offline.
+        # 8. The devices are still "syncing" (the sync context managers were never
+        # closed), so should idle to unavailable.
         state = self.get_success(
             self.presence_handler.get_state(UserID.from_string(user_id))
         )
-        self.assertEqual(state.state, PresenceState.OFFLINE)
+        self.assertEqual(state.state, expected_state_3)
 
     @parameterized.expand(
         # A list of tuples of 4 strings:
