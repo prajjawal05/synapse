@@ -794,7 +794,7 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
         )
 
         # 2. Wait half the idle timer.
-        self.reactor.advance(10)
+        self.reactor.advance(IDLE_TIMER / 1000 / 2)
         self.reactor.pump([0.1])
 
         # 3. Sync with the second device.
@@ -810,14 +810,25 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
 
         # 5. Advance such that the first device should be discarded (the idle timer),
         # then pump so _handle_timeouts function to called.
-        self.reactor.advance(IDLE_TIMER / 1000 - 10)
-        self.reactor.pump([5])
+        self.reactor.advance(IDLE_TIMER / 1000)
+        self.reactor.pump([0.1])
 
         # 6. Assert the expected presence state.
         state = self.get_success(
             self.presence_handler.get_state(UserID.from_string(user_id))
         )
         self.assertEqual(state.state, expected_state_2)
+
+        # 7. Advance such that the second device should be discarded (half the idle timer),
+        # then pump so _handle_timeouts function to called.
+        self.reactor.advance(IDLE_TIMER / 1000 / 2)
+        self.reactor.pump([5])
+
+        # 8. There are no more devices, should be offline.
+        state = self.get_success(
+            self.presence_handler.get_state(UserID.from_string(user_id))
+        )
+        self.assertEqual(state.state, PresenceState.OFFLINE)
 
     def test_set_presence_from_syncing_keeps_status(self) -> None:
         """Test that presence set by syncing retains status message"""
