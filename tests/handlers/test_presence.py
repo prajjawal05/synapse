@@ -754,14 +754,14 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
                 PresenceState.ONLINE,
                 PresenceState.OFFLINE,
                 PresenceState.ONLINE,
-                PresenceState.OFFLINE,
+                PresenceState.UNAVAILABLE,
                 PresenceState.UNAVAILABLE,
             ),
             (
                 PresenceState.UNAVAILABLE,
                 PresenceState.OFFLINE,
                 PresenceState.UNAVAILABLE,
-                PresenceState.OFFLINE,
+                PresenceState.UNAVAILABLE,
                 PresenceState.UNAVAILABLE,
             ),
             # If the second device has a "higher" state it should override.

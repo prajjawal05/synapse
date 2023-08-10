@@ -942,36 +942,6 @@ class PresenceHandler(BasePresenceHandler):
             )
             self.external_process_last_updated_ms.pop(process_id)
 
-        # Check if any devices for these users should be discarded.
-        new_states = []
-        for user_id in users_to_check:
-            user_devices = self.user_to_device_to_current_state.get(user_id, {})
-            # Only keep the devices that have been seen recently *unless* they're busy,
-            # which do not idle out.
-            new_user_devices = {
-                device_id: device
-                for device_id, device in user_devices.items()
-                if (device.state == PresenceState.BUSY and self._busy_presence_enabled)
-                or now - device.last_active_ts <= IDLE_TIMER
-            }
-
-            # If any device has timed out, ensure that the presence state and status msg
-            # is up-to-date.
-            if len(user_devices) != len(new_user_devices):
-                # Note that we don't need to worry about resetting other information as
-                # it will also be the most up-to-date anyway.
-                presence = _combine_device_states(new_user_devices.values())
-
-                new_states.append(
-                    self.user_to_current_state.get(
-                        user_id, UserPresenceState.default(user_id)
-                    ).copy_and_replace(state=presence)
-                )
-
-                self.user_to_device_to_current_state[user_id] = new_user_devices
-        if new_states:
-            await self._update_states(new_states)
-
         states = [
             self.user_to_current_state.get(user_id, UserPresenceState.default(user_id))
             for user_id in users_to_check
@@ -991,6 +961,7 @@ class PresenceHandler(BasePresenceHandler):
             states,
             is_mine_fn=self.is_mine_id,
             syncing_user_ids=syncing_user_ids,
+            user_to_devices=self.user_to_device_to_current_state,
             now=now,
         )
 
@@ -1902,6 +1873,7 @@ def handle_timeouts(
     user_states: List[UserPresenceState],
     is_mine_fn: Callable[[str], bool],
     syncing_user_ids: Set[str],
+    user_to_devices: Dict[str, Dict[Optional[str], UserDevicePresenceState]],
     now: int,
 ) -> List[UserPresenceState]:
     """Checks the presence of users that have timed out and updates as
@@ -1911,6 +1883,7 @@ def handle_timeouts(
         user_states: List of UserPresenceState's to check.
         is_mine_fn: Function that returns if a user_id is ours
         syncing_user_ids: Set of user_ids with active syncs.
+        user_to_devices: A map of user ID to device ID to UserDevicePresenceState.
         now: Current time in ms.
 
     Returns:
@@ -1919,9 +1892,16 @@ def handle_timeouts(
     changes = {}  # Actual changes we need to notify people about
 
     for state in user_states:
-        is_mine = is_mine_fn(state.user_id)
+        user_id = state.user_id
+        is_mine = is_mine_fn(user_id)
 
-        new_state = handle_timeout(state, is_mine, syncing_user_ids, now)
+        new_state = handle_timeout(
+            state,
+            is_mine,
+            syncing_user_ids,
+            user_to_devices.get(user_id, {}),
+            now,
+        )
         if new_state:
             changes[state.user_id] = new_state
 
@@ -1929,14 +1909,19 @@ def handle_timeouts(
 
 
 def handle_timeout(
-    state: UserPresenceState, is_mine: bool, syncing_user_ids: Set[str], now: int
+    state: UserPresenceState,
+    is_mine: bool,
+    syncing_user_ids: Set[str],
+    user_devices: Dict[Optional[str], UserDevicePresenceState],
+    now: int,
 ) -> Optional[UserPresenceState]:
     """Checks the presence of the user to see if any of the timers have elapsed
 
     Args:
-        state
+        state: UserPresenceState to check.
         is_mine: Whether the user is ours
         syncing_user_ids: Set of user_ids with active syncs.
+        user_devices: A map of device ID to UserDevicePresenceState.
         now: Current time in ms.
 
     Returns:
@@ -1950,35 +1935,48 @@ def handle_timeout(
     user_id = state.user_id
 
     if is_mine:
-        print(f"Now: {now}")
-        print(f"Initial state: {state}")
-        if state.state == PresenceState.ONLINE:
-            if now - state.last_active_ts > IDLE_TIMER:
-                print("HIT IDLE TIMER")
-                # Currently online, but last activity ages ago so auto
-                # idle
-                state = state.copy_and_replace(state=PresenceState.UNAVAILABLE)
+        # Check per-device whether the device should be considered idle or offline
+        # due to timeouts.
+        device_changed = False
+        for device_id, device_state in user_devices.items():
+            if device_state.state == PresenceState.ONLINE:
+                if now - device_state.last_active_ts > IDLE_TIMER:
+                    # Currently online, but last activity ages ago so auto
+                    # idle
+                    device_state.state = PresenceState.UNAVAILABLE
+                    device_changed = True
+
+            # If there are have been no sync for a while (and none ongoing),
+            # set presence to offline
+            #
+            # XXX THIS NEEDS TO BE PER DEVICE
+            if user_id not in syncing_user_ids:
+                # If the user has done something recently but hasn't synced,
+                # don't set them as offline.
+                sync_or_active = max(
+                    state.last_user_sync_ts, device_state.last_active_ts
+                )
+                if now - sync_or_active > SYNC_ONLINE_TIMEOUT:
+                    device_state.state = PresenceState.OFFLINE
+                    device_changed = True
+
+        # If the presence state of any of the devices changed, then (maybe) update
+        # the user's overall presence state.
+        if device_changed:
+            new_presence = _combine_device_states(user_devices.values())
+            if new_presence != state.state:
+                state = state.copy_and_replace(state=new_presence)
                 changed = True
-            elif now - state.last_active_ts > LAST_ACTIVE_GRANULARITY:
-                # So that we send down a notification that we've
-                # stopped updating.
-                changed = True
+
+        if now - state.last_active_ts > LAST_ACTIVE_GRANULARITY:
+            # So that we send down a notification that we've
+            # stopped updating.
+            changed = True
 
         if now - state.last_federation_update_ts > FEDERATION_PING_INTERVAL:
             # Need to send ping to other servers to ensure they don't
             # timeout and set us to offline
             changed = True
-
-        # If there are have been no sync for a while (and none ongoing),
-        # set presence to offline
-        if user_id not in syncing_user_ids:
-            # If the user has done something recently but hasn't synced,
-            # don't set them as offline.
-            sync_or_active = max(state.last_user_sync_ts, state.last_active_ts)
-            if now - sync_or_active > SYNC_ONLINE_TIMEOUT:
-                print("HIT SYNC TIMEOUT")
-                state = state.copy_and_replace(state=PresenceState.OFFLINE)
-                changed = True
     else:
         # We expect to be poked occasionally by the other side.
         # This is to protect against forgetful/buggy servers, so that
