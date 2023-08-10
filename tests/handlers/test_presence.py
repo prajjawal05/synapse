@@ -790,7 +790,12 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
 
         # 1. Sync with the first device.
         self.get_success(
-            self.presence_handler.user_syncing(user_id, "dev-1", True, dev_1_state)
+            self.presence_handler.user_syncing(
+                user_id,
+                "dev-1",
+                affect_presence=dev_1_state != PresenceState.OFFLINE,
+                presence_state=dev_1_state,
+            )
         )
 
         # 2. Wait half the idle timer.
@@ -799,7 +804,12 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
 
         # 3. Sync with the second device.
         self.get_success(
-            self.presence_handler.user_syncing(user_id, "dev-2", True, dev_2_state)
+            self.presence_handler.user_syncing(
+                user_id,
+                "dev-2",
+                affect_presence=dev_2_state != PresenceState.OFFLINE,
+                presence_state=dev_2_state,
+            )
         )
 
         # 4. Assert the expected presence state.
