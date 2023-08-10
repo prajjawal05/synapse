@@ -711,44 +711,113 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
         # we should now be online
         self.assertEqual(state.state, PresenceState.ONLINE)
 
-    def test_set_presence_from_syncing_multi_device(self) -> None:
-        """Test that presence is set to the highest priority of all devices."""
+    @parameterized.expand(
+        [
+            # If both devices have the same state, nothing exciting should happen.
+            (
+                PresenceState.ONLINE,
+                PresenceState.ONLINE,
+                PresenceState.ONLINE,
+                PresenceState.ONLINE,
+            ),
+            (
+                PresenceState.UNAVAILABLE,
+                PresenceState.UNAVAILABLE,
+                PresenceState.UNAVAILABLE,
+                PresenceState.UNAVAILABLE,
+            ),
+            (
+                PresenceState.OFFLINE,
+                PresenceState.OFFLINE,
+                PresenceState.OFFLINE,
+                PresenceState.OFFLINE,
+            ),
+            # If the second device has a "lower" state it should fallback to it.
+            (
+                PresenceState.ONLINE,
+                PresenceState.UNAVAILABLE,
+                PresenceState.ONLINE,
+                PresenceState.UNAVAILABLE,
+            ),
+            (
+                PresenceState.ONLINE,
+                PresenceState.OFFLINE,
+                PresenceState.ONLINE,
+                PresenceState.OFFLINE,
+            ),
+            (
+                PresenceState.UNAVAILABLE,
+                PresenceState.OFFLINE,
+                PresenceState.UNAVAILABLE,
+                PresenceState.OFFLINE,
+            ),
+            # If the second device has a "higher" state it should override.
+            (
+                PresenceState.UNAVAILABLE,
+                PresenceState.ONLINE,
+                PresenceState.ONLINE,
+                PresenceState.ONLINE,
+            ),
+            (
+                PresenceState.OFFLINE,
+                PresenceState.ONLINE,
+                PresenceState.ONLINE,
+                PresenceState.ONLINE,
+            ),
+            (
+                PresenceState.OFFLINE,
+                PresenceState.UNAVAILABLE,
+                PresenceState.UNAVAILABLE,
+                PresenceState.UNAVAILABLE,
+            ),
+        ]
+    )
+    def test_set_presence_from_syncing_multi_device(
+        self,
+        dev_1_state: str,
+        dev_2_state: str,
+        expected_state_1: str,
+        expected_state_2: str,
+    ) -> None:
+        """
+        Test the behaviour of multiple devices syncing at the same time.
+
+        Roughly the user's presence state should be set to the "highest" priority
+        of all the devices. When a device then goes offline its state should be
+        discarded and the next highest should win.
+        """
         user_id = f"@test:{self.hs.config.server.server_name}"
 
-        # Create 2 devices, the first is online, the second unavailable.
-
+        # 1. Sync with the first device.
         self.get_success(
-            self.presence_handler.user_syncing(
-                user_id, "dev-1", True, PresenceState.ONLINE
-            )
+            self.presence_handler.user_syncing(user_id, "dev-1", True, dev_1_state)
         )
 
-        # Add some time between syncs.
+        # 2. Wait half the idle timer.
         self.reactor.advance(10)
         self.reactor.pump([0.1])
 
+        # 3. Sync with the second device.
         self.get_success(
-            self.presence_handler.user_syncing(
-                user_id, "dev-2", True, PresenceState.UNAVAILABLE
-            )
+            self.presence_handler.user_syncing(user_id, "dev-2", True, dev_2_state)
         )
 
-        # Online should win.
+        # 4. Assert the expected presence state.
         state = self.get_success(
             self.presence_handler.get_state(UserID.from_string(user_id))
         )
-        self.assertEqual(state.state, PresenceState.ONLINE)
+        self.assertEqual(state.state, expected_state_1)
 
-        # Advance such that the first device should be discarded, then pump so
-        # _handle_timeouts function to called.
+        # 5. Advance such that the first device should be discarded (the idle timer),
+        # then pump so _handle_timeouts function to called.
         self.reactor.advance(IDLE_TIMER / 1000 - 10)
         self.reactor.pump([5])
 
-        # Unavailable.
+        # 6. Assert the expected presence state.
         state = self.get_success(
             self.presence_handler.get_state(UserID.from_string(user_id))
         )
-        self.assertEqual(state.state, PresenceState.UNAVAILABLE)
+        self.assertEqual(state.state, expected_state_2)
 
     def test_set_presence_from_syncing_keeps_status(self) -> None:
         """Test that presence set by syncing retains status message"""
