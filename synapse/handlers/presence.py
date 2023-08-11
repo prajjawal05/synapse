@@ -264,6 +264,7 @@ class BasePresenceHandler(abc.ABC):
         state: JsonDict,
         ignore_status_msg: bool = False,
         force_notify: bool = False,
+        is_sync: bool = False,
     ) -> None:
         """Set the presence state of the user.
 
@@ -273,6 +274,7 @@ class BasePresenceHandler(abc.ABC):
             ignore_status_msg: True to ignore the "status_msg" field of the `state` dict.
                 If False, the user's current status will be updated.
             force_notify: Whether to force notification of the update to clients.
+            is_sync: True if this update was from a sync
         """
 
     @abc.abstractmethod
@@ -516,6 +518,7 @@ class WorkerPresenceHandler(BasePresenceHandler):
                 device_id,
                 state={"presence": presence_state},
                 ignore_status_msg=True,
+                is_sync=True,
             )
 
         curr_sync = self._user_to_num_current_syncs.get(user_id, 0)
@@ -615,6 +618,7 @@ class WorkerPresenceHandler(BasePresenceHandler):
         state: JsonDict,
         ignore_status_msg: bool = False,
         force_notify: bool = False,
+        is_sync: bool = False,
     ) -> None:
         """Set the presence state of the user.
 
@@ -624,6 +628,7 @@ class WorkerPresenceHandler(BasePresenceHandler):
             ignore_status_msg: True to ignore the "status_msg" field of the `state` dict.
                 If False, the user's current status will be updated.
             force_notify: Whether to force notification of the update to clients.
+            is_sync: True if this update was from a sync
         """
         presence = state["presence"]
 
@@ -644,6 +649,7 @@ class WorkerPresenceHandler(BasePresenceHandler):
             state=state,
             ignore_status_msg=ignore_status_msg,
             force_notify=force_notify,
+            is_sync=is_sync,
         )
 
     async def bump_presence_active_time(self, user: UserID) -> None:
@@ -1035,6 +1041,7 @@ class PresenceHandler(BasePresenceHandler):
                 device_id,
                 state={"presence": presence_state},
                 ignore_status_msg=True,
+                is_sync=True,
             )
             # Retrieve the new state for the logic below. This should come from the
             # in-memory cache.
@@ -1236,6 +1243,7 @@ class PresenceHandler(BasePresenceHandler):
         state: JsonDict,
         ignore_status_msg: bool = False,
         force_notify: bool = False,
+        is_sync: bool = False,
     ) -> None:
         """Set the presence state of the user.
 
@@ -1246,6 +1254,7 @@ class PresenceHandler(BasePresenceHandler):
             ignore_status_msg: True to ignore the "status_msg" field of the `state` dict.
                 If False, the user's current status will be updated.
             force_notify: Whether to force notification of the update to clients.
+            is_sync: True if this update was from a sync
         """
         status_msg = state.get("status_msg", None)
         presence = state["presence"]
@@ -1258,6 +1267,7 @@ class PresenceHandler(BasePresenceHandler):
             return
 
         user_id = target_user.to_string()
+        now = self.clock.time_msec()
 
         prev_state = await self.current_state_for_user(user_id)
 
@@ -1271,10 +1281,13 @@ class PresenceHandler(BasePresenceHandler):
                 device_id,
                 presence,
                 last_active_ts=self.clock.time_msec(),
+                last_sync_ts=0,
             ),
         )
         device_state.state = presence
-        device_state.last_active_ts = self.clock.time_msec()
+        device_state.last_active_ts = now
+        if is_sync:
+            device_state.last_sync_ts = now
 
         # Based on (all) the user's devices calculate the new presence state.
         presence = _combine_device_states(
@@ -1290,7 +1303,7 @@ class PresenceHandler(BasePresenceHandler):
         if presence == PresenceState.ONLINE or (
             presence == PresenceState.BUSY and self._busy_presence_enabled
         ):
-            new_fields["last_active_ts"] = self.clock.time_msec()
+            new_fields["last_active_ts"] = now
 
         await self._update_states(
             [prev_state.copy_and_replace(**new_fields)], force_notify=force_notify
@@ -1887,7 +1900,7 @@ def handle_timeouts(
     Args:
         user_states: List of UserPresenceState's to check.
         is_mine_fn: Function that returns if a user_id is ours
-        syncing_user_devices: Set of user_ids with active syncs.
+        syncing_user_devices: A map of user ID to device_ids with active syncs.
         user_to_devices: A map of user ID to device ID to UserDevicePresenceState.
         now: Current time in ms.
 
@@ -1955,14 +1968,15 @@ def handle_timeout(
             if device_id not in syncing_device_ids:
                 # If the user has done something recently but hasn't synced,
                 # don't set them as offline.
-                #
-                # XXX last_user_sync_ts needs to be per-device.
                 sync_or_active = max(
-                    state.last_user_sync_ts, device_state.last_active_ts
+                    device_state.last_sync_ts, device_state.last_active_ts
                 )
                 if now - sync_or_active > SYNC_ONLINE_TIMEOUT:
                     device_state.state = PresenceState.OFFLINE
                     device_changed = True
+
+        # XXX How will this work when restoring from the database if device information
+        # is not kept?
 
         # If the presence state of any of the devices changed, then (maybe) update
         # the user's overall presence state.

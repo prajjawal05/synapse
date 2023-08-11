@@ -367,6 +367,7 @@ class PresenceTimeoutTestCase(unittest.TestCase):
             device_id=device_id,
             state=state.state,
             last_active_ts=state.last_active_ts,
+            last_sync_ts=state.last_user_sync_ts,
         )
 
         new_state = handle_timeout(
@@ -404,6 +405,7 @@ class PresenceTimeoutTestCase(unittest.TestCase):
             device_id=device_id,
             state=state.state,
             last_active_ts=state.last_active_ts,
+            last_sync_ts=state.last_user_sync_ts,
         )
 
         new_state = handle_timeout(
@@ -437,6 +439,7 @@ class PresenceTimeoutTestCase(unittest.TestCase):
             device_id=device_id,
             state=state.state,
             last_active_ts=state.last_active_ts,
+            last_sync_ts=state.last_user_sync_ts,
         )
 
         new_state = handle_timeout(
@@ -470,6 +473,7 @@ class PresenceTimeoutTestCase(unittest.TestCase):
             device_id=device_id,
             state=state.state,
             last_active_ts=state.last_active_ts,
+            last_sync_ts=state.last_user_sync_ts,
         )
 
         new_state = handle_timeout(
@@ -504,6 +508,7 @@ class PresenceTimeoutTestCase(unittest.TestCase):
             device_id=device_id,
             state=state.state,
             last_active_ts=state.last_active_ts,
+            last_sync_ts=state.last_user_sync_ts,
         )
 
         new_state = handle_timeout(
@@ -534,6 +539,7 @@ class PresenceTimeoutTestCase(unittest.TestCase):
             device_id=device_id,
             state=state.state,
             last_active_ts=state.last_active_ts,
+            last_sync_ts=state.last_user_sync_ts,
         )
 
         new_state = handle_timeout(
@@ -589,6 +595,7 @@ class PresenceTimeoutTestCase(unittest.TestCase):
             device_id=device_id,
             state=state.state,
             last_active_ts=state.last_active_ts,
+            last_sync_ts=state.last_user_sync_ts,
         )
 
         new_state = handle_timeout(
@@ -801,6 +808,7 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
         # we should now be online
         self.assertEqual(state.state, PresenceState.ONLINE)
 
+    # TODO Add tests with BUSY.
     @parameterized.expand(
         # A list of tuples of 4 strings:
         #
@@ -952,6 +960,7 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
         )
         self.assertEqual(state.state, expected_state_3)
 
+    # TODO Add tests with BUSY.
     @parameterized.expand(
         # A list of tuples of 4 strings:
         #
