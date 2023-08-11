@@ -21,7 +21,7 @@ from signedjson.key import generate_signing_key
 from twisted.test.proto_helpers import MemoryReactor
 
 from synapse.api.constants import EventTypes, Membership, PresenceState
-from synapse.api.presence import UserPresenceState
+from synapse.api.presence import UserDevicePresenceState, UserPresenceState
 from synapse.api.room_versions import KNOWN_ROOM_VERSIONS
 from synapse.events.builder import EventBuilder
 from synapse.federation.sender import FederationSender
@@ -351,6 +351,7 @@ class PresenceTimeoutTestCase(unittest.TestCase):
 
     def test_idle_timer(self) -> None:
         user_id = "@foo:bar"
+        device_id = "dev-1"
         status_msg = "I'm here!"
         now = 5000000
 
@@ -361,8 +362,20 @@ class PresenceTimeoutTestCase(unittest.TestCase):
             last_user_sync_ts=now,
             status_msg=status_msg,
         )
+        device_state = UserDevicePresenceState(
+            user_id=user_id,
+            device_id=device_id,
+            state=state.state,
+            last_active_ts=state.last_active_ts,
+        )
 
-        new_state = handle_timeout(state, is_mine=True, syncing_user_ids=set(), now=now)
+        new_state = handle_timeout(
+            state,
+            is_mine=True,
+            syncing_device_ids=set(),
+            user_devices={device_id: device_state},
+            now=now,
+        )
 
         self.assertIsNotNone(new_state)
         assert new_state is not None
@@ -375,6 +388,7 @@ class PresenceTimeoutTestCase(unittest.TestCase):
         presence state into unavailable.
         """
         user_id = "@foo:bar"
+        device_id = "dev-1"
         status_msg = "I'm here!"
         now = 5000000
 
@@ -385,8 +399,20 @@ class PresenceTimeoutTestCase(unittest.TestCase):
             last_user_sync_ts=now,
             status_msg=status_msg,
         )
+        device_state = UserDevicePresenceState(
+            user_id=user_id,
+            device_id=device_id,
+            state=state.state,
+            last_active_ts=state.last_active_ts,
+        )
 
-        new_state = handle_timeout(state, is_mine=True, syncing_user_ids=set(), now=now)
+        new_state = handle_timeout(
+            state,
+            is_mine=True,
+            syncing_device_ids=set(),
+            user_devices={device_id: device_state},
+            now=now,
+        )
 
         self.assertIsNotNone(new_state)
         assert new_state is not None
@@ -395,6 +421,7 @@ class PresenceTimeoutTestCase(unittest.TestCase):
 
     def test_sync_timeout(self) -> None:
         user_id = "@foo:bar"
+        device_id = "dev-1"
         status_msg = "I'm here!"
         now = 5000000
 
@@ -405,8 +432,20 @@ class PresenceTimeoutTestCase(unittest.TestCase):
             last_user_sync_ts=now - SYNC_ONLINE_TIMEOUT - 1,
             status_msg=status_msg,
         )
+        device_state = UserDevicePresenceState(
+            user_id=user_id,
+            device_id=device_id,
+            state=state.state,
+            last_active_ts=state.last_active_ts,
+        )
 
-        new_state = handle_timeout(state, is_mine=True, syncing_user_ids=set(), now=now)
+        new_state = handle_timeout(
+            state,
+            is_mine=True,
+            syncing_device_ids=set(),
+            user_devices={device_id: device_state},
+            now=now,
+        )
 
         self.assertIsNotNone(new_state)
         assert new_state is not None
@@ -415,6 +454,7 @@ class PresenceTimeoutTestCase(unittest.TestCase):
 
     def test_sync_online(self) -> None:
         user_id = "@foo:bar"
+        device_id = "dev-1"
         status_msg = "I'm here!"
         now = 5000000
 
@@ -425,9 +465,19 @@ class PresenceTimeoutTestCase(unittest.TestCase):
             last_user_sync_ts=now - SYNC_ONLINE_TIMEOUT - 1,
             status_msg=status_msg,
         )
+        device_state = UserDevicePresenceState(
+            user_id=user_id,
+            device_id=device_id,
+            state=state.state,
+            last_active_ts=state.last_active_ts,
+        )
 
         new_state = handle_timeout(
-            state, is_mine=True, syncing_user_ids={user_id}, now=now
+            state,
+            is_mine=True,
+            syncing_device_ids={device_id},
+            user_devices={device_id: device_state},
+            now=now,
         )
 
         self.assertIsNotNone(new_state)
@@ -437,6 +487,7 @@ class PresenceTimeoutTestCase(unittest.TestCase):
 
     def test_federation_ping(self) -> None:
         user_id = "@foo:bar"
+        device_id = "dev-1"
         status_msg = "I'm here!"
         now = 5000000
 
@@ -448,14 +499,27 @@ class PresenceTimeoutTestCase(unittest.TestCase):
             last_federation_update_ts=now - FEDERATION_PING_INTERVAL - 1,
             status_msg=status_msg,
         )
+        device_state = UserDevicePresenceState(
+            user_id=user_id,
+            device_id=device_id,
+            state=state.state,
+            last_active_ts=state.last_active_ts,
+        )
 
-        new_state = handle_timeout(state, is_mine=True, syncing_user_ids=set(), now=now)
+        new_state = handle_timeout(
+            state,
+            is_mine=True,
+            syncing_device_ids=set(),
+            user_devices={device_id: device_state},
+            now=now,
+        )
 
         self.assertIsNotNone(new_state)
         self.assertEqual(state, new_state)
 
     def test_no_timeout(self) -> None:
         user_id = "@foo:bar"
+        device_id = "dev-1"
         now = 5000000
 
         state = UserPresenceState.default(user_id)
@@ -465,8 +529,20 @@ class PresenceTimeoutTestCase(unittest.TestCase):
             last_user_sync_ts=now,
             last_federation_update_ts=now,
         )
+        device_state = UserDevicePresenceState(
+            user_id=user_id,
+            device_id=device_id,
+            state=state.state,
+            last_active_ts=state.last_active_ts,
+        )
 
-        new_state = handle_timeout(state, is_mine=True, syncing_user_ids=set(), now=now)
+        new_state = handle_timeout(
+            state,
+            is_mine=True,
+            syncing_device_ids=set(),
+            user_devices={device_id: device_state},
+            now=now,
+        )
 
         self.assertIsNone(new_state)
 
@@ -484,8 +560,9 @@ class PresenceTimeoutTestCase(unittest.TestCase):
             status_msg=status_msg,
         )
 
+        # Note that this is a remote user so we do not have their device information.
         new_state = handle_timeout(
-            state, is_mine=False, syncing_user_ids=set(), now=now
+            state, is_mine=False, syncing_device_ids=set(), user_devices={}, now=now
         )
 
         self.assertIsNotNone(new_state)
@@ -495,6 +572,7 @@ class PresenceTimeoutTestCase(unittest.TestCase):
 
     def test_last_active(self) -> None:
         user_id = "@foo:bar"
+        device_id = "dev-1"
         status_msg = "I'm here!"
         now = 5000000
 
@@ -506,8 +584,20 @@ class PresenceTimeoutTestCase(unittest.TestCase):
             last_federation_update_ts=now,
             status_msg=status_msg,
         )
+        device_state = UserDevicePresenceState(
+            user_id=user_id,
+            device_id=device_id,
+            state=state.state,
+            last_active_ts=state.last_active_ts,
+        )
 
-        new_state = handle_timeout(state, is_mine=True, syncing_user_ids=set(), now=now)
+        new_state = handle_timeout(
+            state,
+            is_mine=True,
+            syncing_device_ids=set(),
+            user_devices={device_id: device_state},
+            now=now,
+        )
 
         self.assertIsNotNone(new_state)
         self.assertEqual(state, new_state)
