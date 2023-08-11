@@ -982,7 +982,7 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
         # 5. Advance such that the first device should be discarded (the sync timeout),
         # then pump so _handle_timeouts function to called.
         self.reactor.advance(SYNC_ONLINE_TIMEOUT / 1000)
-        self.reactor.pump([0.1])
+        self.reactor.pump([5])
 
         # 6. Assert the expected presence state.
         state = self.get_success(

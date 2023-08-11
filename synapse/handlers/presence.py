@@ -29,6 +29,7 @@ from contextlib import contextmanager
 from types import TracebackType
 from typing import (
     TYPE_CHECKING,
+    AbstractSet,
     Any,
     Callable,
     Collection,
@@ -717,8 +718,10 @@ class PresenceHandler(BasePresenceHandler):
         )
 
         # Keeps track of the number of *ongoing* syncs on this process. While
-        # this is non zero a user will never go offline.
-        self.user_to_num_current_syncs: Dict[str, int] = {}
+        # this is non empty a user will never go offline.
+        self.user_to_device_to_num_current_syncs: Dict[
+            str, Dict[Optional[str], int]
+        ] = {}
 
         # Keeps track of the number of *ongoing* syncs on other processes.
         # While any sync is ongoing on another process the user will never
@@ -949,18 +952,19 @@ class PresenceHandler(BasePresenceHandler):
 
         timers_fired_counter.inc(len(states))
 
-        syncing_user_ids = {
-            user_id
-            for user_id, count in self.user_to_num_current_syncs.items()
-            if count
+        # Map of user ID to a set of device IDs which are currently syncing.
+        syncing_user_devices = {
+            user_id: {device_id for device_id, count in devices.items() if count}
+            for user_id, devices in self.user_to_device_to_num_current_syncs.items()
         }
-        for user_ids in self.external_process_to_current_syncs.values():
-            syncing_user_ids.update(user_ids)
+        # XXX This will not work yet.
+        # for user_ids in self.external_process_to_current_syncs.values():
+        #     syncing_user_devices.update(user_ids)
 
         changes = handle_timeouts(
             states,
             is_mine_fn=self.is_mine_id,
-            syncing_user_ids=syncing_user_ids,
+            syncing_user_devices=syncing_user_devices,
             user_to_devices=self.user_to_device_to_current_state,
             now=now,
         )
@@ -1012,8 +1016,9 @@ class PresenceHandler(BasePresenceHandler):
         if not affect_presence or not self._presence_enabled:
             return _NullContextManager()
 
-        curr_sync = self.user_to_num_current_syncs.get(user_id, 0)
-        self.user_to_num_current_syncs[user_id] = curr_sync + 1
+        self.user_to_device_to_num_current_syncs.setdefault(user_id, {}).setdefault(
+            device_id, 1
+        )
 
         prev_state = await self.current_state_for_user(user_id)
 
@@ -1058,7 +1063,7 @@ class PresenceHandler(BasePresenceHandler):
 
         async def _end() -> None:
             try:
-                self.user_to_num_current_syncs[user_id] -= 1
+                self.user_to_device_to_num_current_syncs[user_id][device_id] -= 1
 
                 prev_state = await self.current_state_for_user(user_id)
                 await self._update_states(
@@ -1872,7 +1877,7 @@ class PresenceEventSource(EventSource[int, UserPresenceState]):
 def handle_timeouts(
     user_states: List[UserPresenceState],
     is_mine_fn: Callable[[str], bool],
-    syncing_user_ids: Set[str],
+    syncing_user_devices: Dict[str, Set[Optional[str]]],
     user_to_devices: Dict[str, Dict[Optional[str], UserDevicePresenceState]],
     now: int,
 ) -> List[UserPresenceState]:
@@ -1882,7 +1887,7 @@ def handle_timeouts(
     Args:
         user_states: List of UserPresenceState's to check.
         is_mine_fn: Function that returns if a user_id is ours
-        syncing_user_ids: Set of user_ids with active syncs.
+        syncing_user_devices: Set of user_ids with active syncs.
         user_to_devices: A map of user ID to device ID to UserDevicePresenceState.
         now: Current time in ms.
 
@@ -1898,7 +1903,7 @@ def handle_timeouts(
         new_state = handle_timeout(
             state,
             is_mine,
-            syncing_user_ids,
+            syncing_user_devices.get(user_id, frozenset()),
             user_to_devices.get(user_id, {}),
             now,
         )
@@ -1911,7 +1916,7 @@ def handle_timeouts(
 def handle_timeout(
     state: UserPresenceState,
     is_mine: bool,
-    syncing_user_ids: Set[str],
+    syncing_device_ids: AbstractSet[Optional[str]],
     user_devices: Dict[Optional[str], UserDevicePresenceState],
     now: int,
 ) -> Optional[UserPresenceState]:
@@ -1920,7 +1925,7 @@ def handle_timeout(
     Args:
         state: UserPresenceState to check.
         is_mine: Whether the user is ours
-        syncing_user_ids: Set of user_ids with active syncs.
+        syncing_device_ids: Set of device IDs for this user with active syncs.
         user_devices: A map of device ID to UserDevicePresenceState.
         now: Current time in ms.
 
@@ -1932,7 +1937,6 @@ def handle_timeout(
         return None
 
     changed = False
-    user_id = state.user_id
 
     if is_mine:
         # Check per-device whether the device should be considered idle or offline
@@ -1948,11 +1952,11 @@ def handle_timeout(
 
             # If there are have been no sync for a while (and none ongoing),
             # set presence to offline
-            #
-            # XXX THIS NEEDS TO BE PER DEVICE
-            if user_id not in syncing_user_ids:
+            if device_id not in syncing_device_ids:
                 # If the user has done something recently but hasn't synced,
                 # don't set them as offline.
+                #
+                # XXX last_user_sync_ts needs to be per-device.
                 sync_or_active = max(
                     state.last_user_sync_ts, device_state.last_active_ts
                 )
