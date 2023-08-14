@@ -331,7 +331,7 @@ class MediaRepository:
     def respond_not_yet_uploaded(self, request: SynapseRequest) -> None:
         respond_with_json(
             request,
-            404,
+            504,
             cs_error("Media has not been uploaded yet", code=Codes.NOT_YET_UPLOADED),
             send_cors=True,
         )
