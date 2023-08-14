@@ -817,74 +817,80 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
         # * The expected user presence state after both devices have synced.
         # * The expected user presence state after device 1 has idled.
         # * The expected user presence state after device 2 has idled.
+        # * True to use workers, False a monolith.
         [
-            # If both devices have the same state, nothing exciting should happen.
-            (
-                PresenceState.ONLINE,
-                PresenceState.ONLINE,
-                PresenceState.ONLINE,
-                PresenceState.ONLINE,
-                PresenceState.UNAVAILABLE,
-            ),
-            (
-                PresenceState.UNAVAILABLE,
-                PresenceState.UNAVAILABLE,
-                PresenceState.UNAVAILABLE,
-                PresenceState.UNAVAILABLE,
-                PresenceState.UNAVAILABLE,
-            ),
-            (
-                PresenceState.OFFLINE,
-                PresenceState.OFFLINE,
-                PresenceState.OFFLINE,
-                PresenceState.OFFLINE,
-                PresenceState.OFFLINE,
-            ),
-            # If the second device has a "lower" state it should fallback to it.
-            (
-                PresenceState.ONLINE,
-                PresenceState.UNAVAILABLE,
-                PresenceState.ONLINE,
-                PresenceState.UNAVAILABLE,
-                PresenceState.UNAVAILABLE,
-            ),
-            (
-                PresenceState.ONLINE,
-                PresenceState.OFFLINE,
-                PresenceState.ONLINE,
-                PresenceState.UNAVAILABLE,
-                PresenceState.UNAVAILABLE,
-            ),
-            (
-                PresenceState.UNAVAILABLE,
-                PresenceState.OFFLINE,
-                PresenceState.UNAVAILABLE,
-                PresenceState.UNAVAILABLE,
-                PresenceState.UNAVAILABLE,
-            ),
-            # If the second device has a "higher" state it should override.
-            (
-                PresenceState.UNAVAILABLE,
-                PresenceState.ONLINE,
-                PresenceState.ONLINE,
-                PresenceState.ONLINE,
-                PresenceState.UNAVAILABLE,
-            ),
-            (
-                PresenceState.OFFLINE,
-                PresenceState.ONLINE,
-                PresenceState.ONLINE,
-                PresenceState.ONLINE,
-                PresenceState.UNAVAILABLE,
-            ),
-            (
-                PresenceState.OFFLINE,
-                PresenceState.UNAVAILABLE,
-                PresenceState.UNAVAILABLE,
-                PresenceState.UNAVAILABLE,
-                PresenceState.UNAVAILABLE,
-            ),
-        ]
+            (*cases, workers)
+            for workers in (False, True)
+            for cases in [
+                # If both devices have the same state, nothing exciting should happen.
+                (
+                    PresenceState.ONLINE,
+                    PresenceState.ONLINE,
+                    PresenceState.ONLINE,
+                    PresenceState.ONLINE,
+                    PresenceState.UNAVAILABLE,
+                ),
+                (
+                    PresenceState.UNAVAILABLE,
+                    PresenceState.UNAVAILABLE,
+                    PresenceState.UNAVAILABLE,
+                    PresenceState.UNAVAILABLE,
+                    PresenceState.UNAVAILABLE,
+                ),
+                (
+                    PresenceState.OFFLINE,
+                    PresenceState.OFFLINE,
+                    PresenceState.OFFLINE,
+                    PresenceState.OFFLINE,
+                    PresenceState.OFFLINE,
+                ),
+                # If the second device has a "lower" state it should fallback to it.
+                (
+                    PresenceState.ONLINE,
+                    PresenceState.UNAVAILABLE,
+                    PresenceState.ONLINE,
+                    PresenceState.UNAVAILABLE,
+                    PresenceState.UNAVAILABLE,
+                ),
+                (
+                    PresenceState.ONLINE,
+                    PresenceState.OFFLINE,
+                    PresenceState.ONLINE,
+                    PresenceState.UNAVAILABLE,
+                    PresenceState.UNAVAILABLE,
+                ),
+                (
+                    PresenceState.UNAVAILABLE,
+                    PresenceState.OFFLINE,
+                    PresenceState.UNAVAILABLE,
+                    PresenceState.UNAVAILABLE,
+                    PresenceState.UNAVAILABLE,
+                ),
+                # If the second device has a "higher" state it should override.
+                (
+                    PresenceState.UNAVAILABLE,
+                    PresenceState.ONLINE,
+                    PresenceState.ONLINE,
+                    PresenceState.ONLINE,
+                    PresenceState.UNAVAILABLE,
+                ),
+                (
+                    PresenceState.OFFLINE,
+                    PresenceState.ONLINE,
+                    PresenceState.ONLINE,
+                    PresenceState.ONLINE,
+                    PresenceState.UNAVAILABLE,
+                ),
+                (
+                    PresenceState.OFFLINE,
+                    PresenceState.UNAVAILABLE,
+                    PresenceState.UNAVAILABLE,
+                    PresenceState.UNAVAILABLE,
+                    PresenceState.UNAVAILABLE,
+                ),
+            ]
+        ],
+        name_func=lambda testcase_func, param_num, params: f"{testcase_func.__name__}_{param_num}_{'workers' if params.args[5] else 'monolith'}",
     )
     def test_set_presence_from_syncing_multi_device(
         self,
@@ -893,6 +899,7 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
         expected_state_1: str,
         expected_state_2: str,
         expected_state_3: str,
+        test_with_workers: bool,
     ) -> None:
         """
         Test the behaviour of multiple devices syncing at the same time.
@@ -907,14 +914,26 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
         """
         user_id = f"@test:{self.hs.config.server.server_name}"
 
+        # By default, we call /sync against the main process.
+        worker_presence_handler = self.presence_handler
+        if test_with_workers:
+            # Create a worker and use it to handle /sync traffic instead.
+            # This is used to test that presence changes get replicated from workers
+            # to the main process correctly.
+            worker_to_sync_against = self.make_worker_hs(
+                "synapse.app.generic_worker", {"worker_name": "presence_writer"}
+            )
+            worker_presence_handler = worker_to_sync_against.get_presence_handler()
+
         # 1. Sync with the first device.
         self.get_success(
-            self.presence_handler.user_syncing(
+            worker_presence_handler.user_syncing(
                 user_id,
                 "dev-1",
                 affect_presence=dev_1_state != PresenceState.OFFLINE,
                 presence_state=dev_1_state,
-            )
+            ),
+            by=0.01,
         )
 
         # 2. Wait half the idle timer.
@@ -923,12 +942,13 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
 
         # 3. Sync with the second device.
         self.get_success(
-            self.presence_handler.user_syncing(
+            worker_presence_handler.user_syncing(
                 user_id,
                 "dev-2",
                 affect_presence=dev_2_state != PresenceState.OFFLINE,
                 presence_state=dev_2_state,
-            )
+            ),
+            by=0.01,
         )
 
         # 4. Assert the expected presence state.
@@ -939,8 +959,8 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
 
         # 5. Advance such that the first device should be discarded (the idle timer),
         # then pump so _handle_timeouts function to called.
-        self.reactor.advance(IDLE_TIMER / 1000)
-        self.reactor.pump([0.1])
+        self.reactor.advance(IDLE_TIMER / 1000 / 2)
+        self.reactor.pump([0.01])
 
         # 6. Assert the expected presence state.
         state = self.get_success(
@@ -968,65 +988,71 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
         # * The presence state of device 2.
         # * The expected user presence state after both devices have synced.
         # * The expected user presence state after device 1 has stopped syncing.
+        # * True to use workers, False a monolith.
         [
-            # If both devices have the same state, nothing exciting should happen.
-            (
-                PresenceState.ONLINE,
-                PresenceState.ONLINE,
-                PresenceState.ONLINE,
-                PresenceState.ONLINE,
-            ),
-            (
-                PresenceState.UNAVAILABLE,
-                PresenceState.UNAVAILABLE,
-                PresenceState.UNAVAILABLE,
-                PresenceState.UNAVAILABLE,
-            ),
-            (
-                PresenceState.OFFLINE,
-                PresenceState.OFFLINE,
-                PresenceState.OFFLINE,
-                PresenceState.OFFLINE,
-            ),
-            # If the second device has a "lower" state it should fallback to it.
-            (
-                PresenceState.ONLINE,
-                PresenceState.UNAVAILABLE,
-                PresenceState.ONLINE,
-                PresenceState.UNAVAILABLE,
-            ),
-            (
-                PresenceState.ONLINE,
-                PresenceState.OFFLINE,
-                PresenceState.ONLINE,
-                PresenceState.OFFLINE,
-            ),
-            (
-                PresenceState.UNAVAILABLE,
-                PresenceState.OFFLINE,
-                PresenceState.UNAVAILABLE,
-                PresenceState.OFFLINE,
-            ),
-            # If the second device has a "higher" state it should override.
-            (
-                PresenceState.UNAVAILABLE,
-                PresenceState.ONLINE,
-                PresenceState.ONLINE,
-                PresenceState.ONLINE,
-            ),
-            (
-                PresenceState.OFFLINE,
-                PresenceState.ONLINE,
-                PresenceState.ONLINE,
-                PresenceState.ONLINE,
-            ),
-            (
-                PresenceState.OFFLINE,
-                PresenceState.UNAVAILABLE,
-                PresenceState.UNAVAILABLE,
-                PresenceState.UNAVAILABLE,
-            ),
-        ]
+            (*cases, workers)
+            for workers in (False, True)
+            for cases in [
+                # If both devices have the same state, nothing exciting should happen.
+                (
+                    PresenceState.ONLINE,
+                    PresenceState.ONLINE,
+                    PresenceState.ONLINE,
+                    PresenceState.ONLINE,
+                ),
+                (
+                    PresenceState.UNAVAILABLE,
+                    PresenceState.UNAVAILABLE,
+                    PresenceState.UNAVAILABLE,
+                    PresenceState.UNAVAILABLE,
+                ),
+                (
+                    PresenceState.OFFLINE,
+                    PresenceState.OFFLINE,
+                    PresenceState.OFFLINE,
+                    PresenceState.OFFLINE,
+                ),
+                # If the second device has a "lower" state it should fallback to it.
+                (
+                    PresenceState.ONLINE,
+                    PresenceState.UNAVAILABLE,
+                    PresenceState.ONLINE,
+                    PresenceState.UNAVAILABLE,
+                ),
+                (
+                    PresenceState.ONLINE,
+                    PresenceState.OFFLINE,
+                    PresenceState.ONLINE,
+                    PresenceState.OFFLINE,
+                ),
+                (
+                    PresenceState.UNAVAILABLE,
+                    PresenceState.OFFLINE,
+                    PresenceState.UNAVAILABLE,
+                    PresenceState.OFFLINE,
+                ),
+                # If the second device has a "higher" state it should override.
+                (
+                    PresenceState.UNAVAILABLE,
+                    PresenceState.ONLINE,
+                    PresenceState.ONLINE,
+                    PresenceState.ONLINE,
+                ),
+                (
+                    PresenceState.OFFLINE,
+                    PresenceState.ONLINE,
+                    PresenceState.ONLINE,
+                    PresenceState.ONLINE,
+                ),
+                (
+                    PresenceState.OFFLINE,
+                    PresenceState.UNAVAILABLE,
+                    PresenceState.UNAVAILABLE,
+                    PresenceState.UNAVAILABLE,
+                ),
+            ]
+        ],
+        name_func=lambda testcase_func, param_num, params: f"{testcase_func.__name__}_{param_num}_{'workers' if params.args[4] else 'monolith'}",
     )
     def test_set_presence_from_non_syncing_multi_device(
         self,
@@ -1034,6 +1060,7 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
         dev_2_state: str,
         expected_state_1: str,
         expected_state_2: str,
+        test_with_workers: bool,
     ) -> None:
         """
         Test the behaviour of multiple devices syncing at the same time.
@@ -1048,24 +1075,37 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
         """
         user_id = f"@test:{self.hs.config.server.server_name}"
 
+        # By default, we call /sync against the main process.
+        worker_presence_handler = self.presence_handler
+        if test_with_workers:
+            # Create a worker and use it to handle /sync traffic instead.
+            # This is used to test that presence changes get replicated from workers
+            # to the main process correctly.
+            worker_to_sync_against = self.make_worker_hs(
+                "synapse.app.generic_worker", {"worker_name": "presence_writer"}
+            )
+            worker_presence_handler = worker_to_sync_against.get_presence_handler()
+
         # 1. Sync with the first device.
         sync_1 = self.get_success(
-            self.presence_handler.user_syncing(
+            worker_presence_handler.user_syncing(
                 user_id,
                 "dev-1",
                 affect_presence=dev_1_state != PresenceState.OFFLINE,
                 presence_state=dev_1_state,
-            )
+            ),
+            by=0.1,
         )
 
         # 2. Sync with the second device.
         sync_2 = self.get_success(
-            self.presence_handler.user_syncing(
+            worker_presence_handler.user_syncing(
                 user_id,
                 "dev-2",
                 affect_presence=dev_2_state != PresenceState.OFFLINE,
                 presence_state=dev_2_state,
-            )
+            ),
+            by=0.1,
         )
 
         # 3. Assert the expected presence state.
