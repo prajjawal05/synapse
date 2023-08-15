@@ -112,6 +112,8 @@ LAST_ACTIVE_GRANULARITY = 60 * 1000
 # How long to wait until a new /events or /sync request before assuming
 # the client has gone.
 SYNC_ONLINE_TIMEOUT = 30 * 1000
+# Busy status waits longer, but does eventually go offline.
+BUSY_ONLINE_TIMEOUT = 60 * 60 * 1000
 
 # How long to wait before marking the user as idle. Compared against last active
 IDLE_TIMER = 5 * 60 * 1000
@@ -527,20 +529,13 @@ class WorkerPresenceHandler(BasePresenceHandler):
         if not affect_presence or not self._presence_enabled:
             return _NullContextManager()
 
-        prev_state = await self.current_state_for_user(user_id)
-        if prev_state.state != PresenceState.BUSY:
-            # We set state here but pass ignore_status_msg = True as we don't want to
-            # cause the status message to be cleared.
-            # Note that this causes last_active_ts to be incremented which is not
-            # what the spec wants: see comment in the BasePresenceHandler version
-            # of this function.
-            await self.set_state(
-                UserID.from_string(user_id),
-                device_id,
-                state={"presence": presence_state},
-                ignore_status_msg=True,
-                is_sync=True,
-            )
+        await self.set_state(
+            UserID.from_string(user_id),
+            device_id,
+            state={"presence": presence_state},
+            ignore_status_msg=True,
+            is_sync=True,
+        )
 
         curr_sync = self._user_device_to_num_current_syncs.get((user_id, device_id), 0)
         self._user_device_to_num_current_syncs[(user_id, device_id)] = curr_sync + 1
@@ -1094,50 +1089,13 @@ class PresenceHandler(BasePresenceHandler):
             device_id, 1
         )
 
-        prev_state = await self.current_state_for_user(user_id)
-
-        # If they're busy then they don't stop being busy just by syncing,
-        # so just update the last sync time.
-        if prev_state.state != PresenceState.BUSY:
-            # XXX: We set_state separately here and just update the last_active_ts above
-            # This keeps the logic as similar as possible between the worker and single
-            # process modes. Using set_state will actually cause last_active_ts to be
-            # updated always, which is not what the spec calls for, but synapse has done
-            # this for... forever, I think.
-            await self.set_state(
-                UserID.from_string(user_id),
-                device_id,
-                state={"presence": presence_state},
-                ignore_status_msg=True,
-                is_sync=True,
-            )
-            # Retrieve the new state for the logic below. This should come from the
-            # in-memory cache.
-            prev_state = await self.current_state_for_user(user_id)
-
-        # To keep the single process behaviour consistent with worker mode, run the
-        # same logic as `update_external_syncs_row`, even though it looks weird.
-        #
-        # TODO This does not really match update_external_syncs_row which sets
-        # the device state and then generates a new state from that.
-        if prev_state.state == PresenceState.OFFLINE:
-            await self._update_states(
-                [
-                    prev_state.copy_and_replace(
-                        state=PresenceState.ONLINE,
-                        last_active_ts=self.clock.time_msec(),
-                        last_user_sync_ts=self.clock.time_msec(),
-                    )
-                ]
-            )
-        # otherwise, set the new presence state & update the last sync time,
-        # but don't update last_active_ts as this isn't an indication that
-        # they've been active (even though it's probably been updated by
-        # set_state above)
-        else:
-            await self._update_states(
-                [prev_state.copy_and_replace(last_user_sync_ts=self.clock.time_msec())]
-            )
+        await self.set_state(
+            UserID.from_string(user_id),
+            device_id,
+            state={"presence": presence_state},
+            ignore_status_msg=True,
+            is_sync=True,
+        )
 
         async def _end() -> None:
             try:
@@ -1375,6 +1333,12 @@ class PresenceHandler(BasePresenceHandler):
 
         prev_state = await self.current_state_for_user(user_id)
 
+        # Syncs do not override a previous presence of busy.
+        #
+        # XXX: This is *not* part of the MSC and is likely unneeded with multi-device support.
+        if prev_state.state == PresenceState.BUSY and is_sync:
+            presence = PresenceState.BUSY
+
         # Always update the device specific information.
         devices = self.user_to_device_to_current_state.setdefault(user_id, {})
         device_state = devices.setdefault(
@@ -1386,19 +1350,19 @@ class PresenceHandler(BasePresenceHandler):
         if is_sync:
             device_state.last_sync_ts = now
 
-        # Based on (all) the user's devices calculate the new presence state.
+        # Based on the state of each user's device calculate the new presence state.
         presence = _combine_device_states(devices.values())
 
-        # The newly updated status as an amalgamation of all the device statuses.
         new_fields = {"state": presence}
 
         if not ignore_status_msg:
             new_fields["status_msg"] = status_msg
 
-        if presence == PresenceState.ONLINE or (
-            presence == PresenceState.BUSY and self._busy_presence_enabled
-        ):
+        if presence == PresenceState.ONLINE or presence == PresenceState.BUSY:
             new_fields["last_active_ts"] = now
+
+        if is_sync:
+            new_fields["last_user_sync_ts"] = now
 
         await self._update_states(
             [prev_state.copy_and_replace(**new_fields)], force_notify=force_notify
@@ -2067,7 +2031,16 @@ def handle_timeout(
                 sync_or_active = max(
                     device_state.last_sync_ts, device_state.last_active_ts
                 )
-                if now - sync_or_active > SYNC_ONLINE_TIMEOUT:
+
+                # Implementations aren't meant to timeout a device with a busy
+                # state, but it needs to timeout *eventually* or else the user
+                # will be stuck in that state.
+                online_timeout = (
+                    BUSY_ONLINE_TIMEOUT
+                    if device_state.state == PresenceState.BUSY
+                    else SYNC_ONLINE_TIMEOUT
+                )
+                if now - sync_or_active > online_timeout:
                     # Mark the device as going offline.
                     offline_devices.append(device_id)
                     device_changed = True
@@ -2166,6 +2139,13 @@ def handle_update(
                 # Been a while since we've poked remote servers
                 new_state = new_state.copy_and_replace(last_federation_update_ts=now)
                 federation_ping = True
+
+        if new_state.state == PresenceState.BUSY:
+            wheel_timer.insert(
+                now=now,
+                obj=user_id,
+                then=new_state.last_user_sync_ts + BUSY_ONLINE_TIMEOUT,
+            )
 
     else:
         wheel_timer.insert(

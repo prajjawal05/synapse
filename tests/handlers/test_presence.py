@@ -26,6 +26,7 @@ from synapse.api.room_versions import KNOWN_ROOM_VERSIONS
 from synapse.events.builder import EventBuilder
 from synapse.federation.sender import FederationSender
 from synapse.handlers.presence import (
+    BUSY_ONLINE_TIMEOUT,
     EXTERNAL_PROCESS_EXPIRY,
     FEDERATION_PING_INTERVAL,
     FEDERATION_TIMEOUT,
@@ -921,7 +922,6 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
         # we should now be online
         self.assertEqual(state.state, PresenceState.ONLINE)
 
-    # TODO Add tests with BUSY.
     @parameterized.expand(
         # A list of tuples of 4 strings:
         #
@@ -935,7 +935,15 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
             (*cases, workers)
             for workers in (False, True)
             for cases in [
-                # If both devices have the same state, nothing exciting should happen.
+                # If both devices have the same state, online should eventually idle.
+                # Otherwise, the state doesn't change.
+                (
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                ),
                 (
                     PresenceState.ONLINE,
                     PresenceState.ONLINE,
@@ -957,7 +965,29 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
                     PresenceState.OFFLINE,
                     PresenceState.OFFLINE,
                 ),
-                # If the second device has a "lower" state it should fallback to it.
+                # If the second device has a "lower" state it should fallback to it,
+                # except for "busy" which overrides.
+                (
+                    PresenceState.BUSY,
+                    PresenceState.ONLINE,
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                ),
+                (
+                    PresenceState.BUSY,
+                    PresenceState.UNAVAILABLE,
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                ),
+                (
+                    PresenceState.BUSY,
+                    PresenceState.OFFLINE,
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                ),
                 (
                     PresenceState.ONLINE,
                     PresenceState.UNAVAILABLE,
@@ -980,6 +1010,27 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
                     PresenceState.UNAVAILABLE,
                 ),
                 # If the second device has a "higher" state it should override.
+                (
+                    PresenceState.ONLINE,
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                ),
+                (
+                    PresenceState.UNAVAILABLE,
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                ),
+                (
+                    PresenceState.OFFLINE,
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                ),
                 (
                     PresenceState.UNAVAILABLE,
                     PresenceState.ONLINE,
@@ -1005,6 +1056,7 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
         ],
         name_func=lambda testcase_func, param_num, params: f"{testcase_func.__name__}_{param_num}_{'workers' if params.args[5] else 'monolith'}",
     )
+    @unittest.override_config({"experimental_features": {"msc3026_enabled": True}})
     def test_set_presence_from_syncing_multi_device(
         self,
         dev_1_state: str,
@@ -1113,7 +1165,7 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
         self.reactor.pump([0.1])
 
         # 8. The devices are still "syncing" (the sync context managers were never
-        # closed), so should idle to unavailable.
+        # closed), so might idle.
         state = self.get_success(
             self.presence_handler.get_state(UserID.from_string(user_id))
         )
@@ -1124,7 +1176,6 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
             )
             self.assertEqual(state.state, expected_state_3)
 
-    # TODO Add tests with BUSY.
     @parameterized.expand(
         # A list of tuples of 4 strings:
         #
@@ -1139,6 +1190,12 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
             for cases in [
                 # If both devices have the same state, nothing exciting should happen.
                 (
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                ),
+                (
                     PresenceState.ONLINE,
                     PresenceState.ONLINE,
                     PresenceState.ONLINE,
@@ -1156,7 +1213,26 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
                     PresenceState.OFFLINE,
                     PresenceState.OFFLINE,
                 ),
-                # If the second device has a "lower" state it should fallback to it.
+                # If the second device has a "lower" state it should fallback to it,
+                # except for "busy" which overrides.
+                (
+                    PresenceState.BUSY,
+                    PresenceState.ONLINE,
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                ),
+                (
+                    PresenceState.BUSY,
+                    PresenceState.UNAVAILABLE,
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                ),
+                (
+                    PresenceState.BUSY,
+                    PresenceState.OFFLINE,
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                ),
                 (
                     PresenceState.ONLINE,
                     PresenceState.UNAVAILABLE,
@@ -1176,6 +1252,24 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
                     PresenceState.OFFLINE,
                 ),
                 # If the second device has a "higher" state it should override.
+                (
+                    PresenceState.ONLINE,
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                ),
+                (
+                    PresenceState.UNAVAILABLE,
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                ),
+                (
+                    PresenceState.OFFLINE,
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                    PresenceState.BUSY,
+                ),
                 (
                     PresenceState.UNAVAILABLE,
                     PresenceState.ONLINE,
@@ -1198,6 +1292,7 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
         ],
         name_func=lambda testcase_func, param_num, params: f"{testcase_func.__name__}_{param_num}_{'workers' if params.args[4] else 'monolith'}",
     )
+    @unittest.override_config({"experimental_features": {"msc3026_enabled": True}})
     def test_set_presence_from_non_syncing_multi_device(
         self,
         dev_1_state: str,
@@ -1289,7 +1384,11 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
 
         # 8. Advance such that the second device should be discarded (the sync timeout),
         # then pump so _handle_timeouts function to called.
-        self.reactor.advance(SYNC_ONLINE_TIMEOUT / 1000)
+        if dev_1_state == PresenceState.BUSY or dev_2_state == PresenceState.BUSY:
+            timeout = BUSY_ONLINE_TIMEOUT
+        else:
+            timeout = SYNC_ONLINE_TIMEOUT
+        self.reactor.advance(timeout / 1000)
         self.reactor.pump([5])
 
         # 9. There are no more devices, should be offline.
@@ -1325,13 +1424,7 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
         self.assertEqual(state.status_msg, status_msg)
 
     @parameterized.expand([(False,), (True,)])
-    @unittest.override_config(
-        {
-            "experimental_features": {
-                "msc3026_enabled": True,
-            },
-        }
-    )
+    @unittest.override_config({"experimental_features": {"msc3026_enabled": True}})
     def test_set_presence_from_syncing_keeps_busy(
         self, test_with_workers: bool
     ) -> None:
@@ -1365,7 +1458,8 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
         self.get_success(
             worker_to_sync_against.get_presence_handler().user_syncing(
                 user_id, None, True, PresenceState.ONLINE
-            )
+            ),
+            by=0.1,
         )
 
         # Check against the main process that the user's presence did not change.
@@ -1385,6 +1479,16 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
             self.presence_handler.get_state(UserID.from_string(user_id))
         )
         self.assertEqual(state.state, PresenceState.BUSY)
+
+        # Ensure that a /presence call can set the user *off* busy.
+        self._set_presencestate_with_status_msg(
+            user_id, None, PresenceState.ONLINE, status_msg
+        )
+
+        state = self.get_success(
+            self.presence_handler.get_state(UserID.from_string(user_id))
+        )
+        self.assertEqual(state.state, PresenceState.ONLINE)
 
     def _set_presencestate_with_status_msg(
         self,
