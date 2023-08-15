@@ -1069,6 +1069,11 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
             self.presence_handler.get_state(UserID.from_string(user_id))
         )
         self.assertEqual(state.state, expected_state_1)
+        if test_with_workers:
+            state = self.get_success(
+                worker_presence_handler.get_state(UserID.from_string(user_id))
+            )
+            self.assertEqual(state.state, expected_state_1)
 
         # When testing with workers, make another random sync (with any *different*
         # user) to keep the process information from expiring.
@@ -1096,6 +1101,11 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
             self.presence_handler.get_state(UserID.from_string(user_id))
         )
         self.assertEqual(state.state, expected_state_2)
+        if test_with_workers:
+            state = self.get_success(
+                worker_presence_handler.get_state(UserID.from_string(user_id))
+            )
+            self.assertEqual(state.state, expected_state_2)
 
         # 7. Advance such that the second device should be discarded (half the idle timer),
         # then pump so _handle_timeouts function to called.
@@ -1108,6 +1118,11 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
             self.presence_handler.get_state(UserID.from_string(user_id))
         )
         self.assertEqual(state.state, expected_state_3)
+        if test_with_workers:
+            state = self.get_success(
+                worker_presence_handler.get_state(UserID.from_string(user_id))
+            )
+            self.assertEqual(state.state, expected_state_3)
 
     # TODO Add tests with BUSY.
     @parameterized.expand(
@@ -1242,6 +1257,11 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
             self.presence_handler.get_state(UserID.from_string(user_id))
         )
         self.assertEqual(state.state, expected_state_1)
+        if test_with_workers:
+            state = self.get_success(
+                worker_presence_handler.get_state(UserID.from_string(user_id))
+            )
+            self.assertEqual(state.state, expected_state_1)
 
         # 4. Disconnect the first device.
         with sync_1:
@@ -1257,6 +1277,11 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
             self.presence_handler.get_state(UserID.from_string(user_id))
         )
         self.assertEqual(state.state, expected_state_2)
+        if test_with_workers:
+            state = self.get_success(
+                worker_presence_handler.get_state(UserID.from_string(user_id))
+            )
+            self.assertEqual(state.state, expected_state_2)
 
         # 7. Disconnect the second device.
         with sync_2:
@@ -1272,6 +1297,11 @@ class PresenceHandlerTestCase(BaseMultiWorkerStreamTestCase):
             self.presence_handler.get_state(UserID.from_string(user_id))
         )
         self.assertEqual(state.state, PresenceState.OFFLINE)
+        if test_with_workers:
+            state = self.get_success(
+                worker_presence_handler.get_state(UserID.from_string(user_id))
+            )
+            self.assertEqual(state.state, PresenceState.OFFLINE)
 
     def test_set_presence_from_syncing_keeps_status(self) -> None:
         """Test that presence set by syncing retains status message"""
