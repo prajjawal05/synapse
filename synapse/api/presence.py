@@ -28,6 +28,19 @@ class UserDevicePresenceState:
     last_active_ts: int
     last_sync_ts: int
 
+    @classmethod
+    def default(
+        cls, user_id: str, device_id: Optional[str]
+    ) -> "UserDevicePresenceState":
+        """Returns a default presence state."""
+        return cls(
+            user_id=user_id,
+            device_id=device_id,
+            state=PresenceState.OFFLINE,
+            last_active_ts=0,
+            last_sync_ts=0,
+        )
+
 
 @attr.s(slots=True, frozen=True, auto_attribs=True)
 class UserPresenceState:

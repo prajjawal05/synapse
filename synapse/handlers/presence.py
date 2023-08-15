@@ -278,7 +278,9 @@ class BasePresenceHandler(abc.ABC):
         """
 
     @abc.abstractmethod
-    async def bump_presence_active_time(self, user: UserID) -> None:
+    async def bump_presence_active_time(
+        self, user: UserID, device_id: Optional[str]
+    ) -> None:
         """We've seen the user do something that indicates they're interacting
         with the app.
         """
@@ -652,7 +654,9 @@ class WorkerPresenceHandler(BasePresenceHandler):
             is_sync=is_sync,
         )
 
-    async def bump_presence_active_time(self, user: UserID) -> None:
+    async def bump_presence_active_time(
+        self, user: UserID, device_id: Optional[str]
+    ) -> None:
         """We've seen the user do something that indicates they're interacting
         with the app.
         """
@@ -663,7 +667,9 @@ class WorkerPresenceHandler(BasePresenceHandler):
         # Proxy request to instance that writes presence
         user_id = user.to_string()
         await self._bump_active_client(
-            instance_name=self._presence_writer_instance, user_id=user_id
+            instance_name=self._presence_writer_instance,
+            user_id=user_id,
+            device_id=device_id,
         )
 
 
@@ -977,7 +983,9 @@ class PresenceHandler(BasePresenceHandler):
 
         return await self._update_states(changes)
 
-    async def bump_presence_active_time(self, user: UserID) -> None:
+    async def bump_presence_active_time(
+        self, user: UserID, device_id: Optional[str]
+    ) -> None:
         """We've seen the user do something that indicates they're interacting
         with the app.
         """
@@ -989,11 +997,26 @@ class PresenceHandler(BasePresenceHandler):
 
         bump_active_time_counter.inc()
 
-        prev_state = await self.current_state_for_user(user_id)
+        now = self.clock.time_msec()
 
-        new_fields: Dict[str, Any] = {"last_active_ts": self.clock.time_msec()}
-        if prev_state.state == PresenceState.UNAVAILABLE:
-            new_fields["state"] = PresenceState.ONLINE
+        # Update the device information & mark the device as online if it was
+        # unavailable.
+        devices = self.user_to_device_to_current_state.setdefault(user_id, {})
+        device_state = devices.setdefault(
+            device_id,
+            UserDevicePresenceState.default(user_id, device_id),
+        )
+        device_state.last_active_ts = now
+        if device_state.state == PresenceState.UNAVAILABLE:
+            device_state.state = PresenceState.ONLINE
+
+        # Update the user state, if this will always update last_active_ts and
+        # might update the presence state.
+        prev_state = await self.current_state_for_user(user_id)
+        new_fields: Dict[str, Any] = {
+            "last_active_ts": now,
+            "presence": _combine_device_states(devices.values()),
+        }
 
         await self._update_states([prev_state.copy_and_replace(**new_fields)])
 
@@ -1272,17 +1295,10 @@ class PresenceHandler(BasePresenceHandler):
         prev_state = await self.current_state_for_user(user_id)
 
         # Always update the device specific information.
-        device_state = self.user_to_device_to_current_state.setdefault(
-            user_id, {}
-        ).setdefault(
+        devices = self.user_to_device_to_current_state.setdefault(user_id, {})
+        device_state = devices.setdefault(
             device_id,
-            UserDevicePresenceState(
-                user_id,
-                device_id,
-                presence,
-                last_active_ts=self.clock.time_msec(),
-                last_sync_ts=0,
-            ),
+            UserDevicePresenceState.default(user_id, device_id),
         )
         device_state.state = presence
         device_state.last_active_ts = now
@@ -1290,9 +1306,7 @@ class PresenceHandler(BasePresenceHandler):
             device_state.last_sync_ts = now
 
         # Based on (all) the user's devices calculate the new presence state.
-        presence = _combine_device_states(
-            self.user_to_device_to_current_state[user_id].values()
-        )
+        presence = _combine_device_states(devices.values())
 
         # The newly updated status as an amalgamation of all the device statuses.
         new_fields = {"state": presence}
