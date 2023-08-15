@@ -717,9 +717,27 @@ class PresenceHandler(BasePresenceHandler):
             lambda: len(self.user_to_current_state),
         )
 
+        # The per-device presence state, maps user to devices to per-device presence state.
+        self.user_to_device_to_current_state: Dict[
+            str, Dict[Optional[str], UserDevicePresenceState]
+        ] = {}
+
         now = self.clock.time_msec()
         if self._presence_enabled:
             for state in self.user_to_current_state.values():
+                # Create a psuedo-device so that it times out appropriately, but is
+                # overridden by any "real" devices.
+                pseudo_device_id = None
+                self.user_to_device_to_current_state[state.user_id] = {
+                    pseudo_device_id: UserDevicePresenceState(
+                        user_id=state.user_id,
+                        device_id=pseudo_device_id,
+                        state=state.state,
+                        last_active_ts=state.last_active_ts,
+                        last_sync_ts=state.last_user_sync_ts,
+                    )
+                }
+
                 self.wheel_timer.insert(
                     now=now, obj=state.user_id, then=state.last_active_ts + IDLE_TIMER
                 )
@@ -806,11 +824,6 @@ class PresenceHandler(BasePresenceHandler):
         # stream from the current state when we restart.
         self._event_pos = self.store.get_room_max_stream_ordering()
         self._event_processing = False
-
-        # The per-device presence state, maps user to devices to per-device presence state.
-        self.user_to_device_to_current_state: Dict[
-            str, Dict[Optional[str], UserDevicePresenceState]
-        ] = {}
 
     async def _on_shutdown(self) -> None:
         """Gets called when shutting down. This lets us persist any updates that
@@ -2046,7 +2059,7 @@ def handle_timeout(
                     device_changed = True
 
             # If there are have been no sync for a while (and none ongoing),
-            # set presence to offline
+            # set presence to offline.
             if device_id not in syncing_device_ids:
                 # If the user has done something recently but hasn't synced,
                 # don't set them as offline.
@@ -2056,9 +2069,6 @@ def handle_timeout(
                 if now - sync_or_active > SYNC_ONLINE_TIMEOUT:
                     device_state.state = PresenceState.OFFLINE
                     device_changed = True
-
-        # XXX How will this work when restoring from the database if device information
-        # is not kept?
 
         # If the presence state of any of the devices changed, then (maybe) update
         # the user's overall presence state.
