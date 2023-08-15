@@ -1098,7 +1098,7 @@ class PresenceHandler(BasePresenceHandler):
         prev_state = await self.current_state_for_user(user_id)
         new_fields: Dict[str, Any] = {
             "last_active_ts": now,
-            "presence": _combine_device_states(devices.values()),
+            "state": _combine_device_states(devices.values()),
         }
 
         await self._update_states([prev_state.copy_and_replace(**new_fields)])
