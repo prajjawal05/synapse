@@ -673,22 +673,10 @@ class PresenceHandlerInitTestCase(unittest.HomeserverTestCase):
 
     @parameterized.expand(
         [
-            (
-                PresenceState.BUSY,
-                PresenceState.BUSY,
-            ),
-            (
-                PresenceState.ONLINE,
-                PresenceState.ONLINE,
-            ),
-            (
-                PresenceState.UNAVAILABLE,
-                PresenceState.ONLINE,
-            ),
-            (
-                PresenceState.OFFLINE,
-                PresenceState.ONLINE,
-            ),
+            (PresenceState.BUSY, PresenceState.BUSY),
+            (PresenceState.ONLINE, PresenceState.ONLINE),
+            (PresenceState.UNAVAILABLE, PresenceState.ONLINE),
+            (PresenceState.OFFLINE, PresenceState.ONLINE),
         ]
     )
     @unittest.override_config({"experimental_features": {"msc3026_enabled": True}})
