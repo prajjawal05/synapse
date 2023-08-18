@@ -34,7 +34,15 @@ from synapse.api.errors import (
     SynapseError,
 )
 from synapse.rest import admin
-from synapse.rest.client import account, devices, keys, login, logout, register
+from synapse.rest.client import (
+    account,
+    capabilities,
+    devices,
+    keys,
+    login,
+    logout,
+    register,
+)
 from synapse.server import HomeServer
 from synapse.types import JsonDict
 from synapse.util import Clock
@@ -103,6 +111,7 @@ async def get_json(url: str) -> JsonDict:
 class MSC3861OAuthDelegation(HomeserverTestCase):
     servlets = [
         account.register_servlets,
+        capabilities.register_servlets,
         devices.register_servlets,
         keys.register_servlets,
         register.register_servlets,
@@ -659,6 +668,38 @@ class MSC3861OAuthDelegation(HomeserverTestCase):
         )
         self.expect_unrecognized(
             "POST", "/_matrix/client/v3/account/3pid/msisdn/requestToken"
+        )
+
+    def test_3pid_changes_disabled(self) -> None:
+        """Test that 3pid changes is disabled since the delegated OpenID provider is responsible of it."""
+        self.http_client.request = simple_async_mock(
+            return_value=FakeResponse.json(
+                code=200,
+                payload={
+                    "active": True,
+                    "sub": SUBJECT,
+                    "scope": " ".join([MATRIX_USER_SCOPE]),
+                    "username": USERNAME,
+                },
+            )
+        )
+        request = Mock(args={})
+        request.args[b"access_token"] = [b"mockAccessToken"]
+        request.requestHeaders.getRawHeaders = mock_getRawHeaders()
+
+        channel = self.make_request(
+            "GET",
+            "/_matrix/client/v3/capabilities",
+            access_token="mockAccessToken",
+        )
+
+        self.assertEqual(channel.code, 200, channel.json_body)
+        self.assertEqual(
+            channel.json_body.get("capabilities", {})
+            .get("m.3pid_changes", {})
+            .get("enabled", True),
+            False,
+            channel.json_body,
         )
 
     def test_account_management_endpoints_removed(self) -> None:

@@ -46,6 +46,11 @@ class CapabilitiesRestServlet(RestServlet):
         await self.auth.get_user_by_req(request, allow_guest=True)
         change_password = self.auth_handler.can_change_password()
 
+        enable_3pid_changes = self.config.registration.enable_3pid_changes
+        # In this case the delegated OpenID Provider is responsible for 3pid management
+        if self.config.experimental.msc3861.enabled:
+            enable_3pid_changes = False
+
         response: JsonDict = {
             "capabilities": {
                 "m.room_versions": {
@@ -62,9 +67,7 @@ class CapabilitiesRestServlet(RestServlet):
                 "m.set_avatar_url": {
                     "enabled": self.config.registration.enable_set_avatar_url
                 },
-                "m.3pid_changes": {
-                    "enabled": self.config.registration.enable_3pid_changes
-                },
+                "m.3pid_changes": {"enabled": enable_3pid_changes},
                 "m.get_login_token": {
                     "enabled": self.config.auth.login_via_existing_enabled,
                 },
