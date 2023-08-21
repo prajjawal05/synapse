@@ -22,6 +22,7 @@ from typing import (
     Any,
     ClassVar,
     Dict,
+    Final,
     List,
     Mapping,
     Match,
@@ -39,7 +40,7 @@ import attr
 from immutabledict import immutabledict
 from signedjson.key import decode_verify_key_bytes
 from signedjson.types import VerifyKey
-from typing_extensions import Final, TypedDict
+from typing_extensions import TypedDict
 from unpaddedbase64 import decode_base64
 from zope.interface import Interface
 
