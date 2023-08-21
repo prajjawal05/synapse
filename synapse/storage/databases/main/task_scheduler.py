@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from synapse.storage._base import SQLBaseStore, db_to_json
@@ -51,35 +50,31 @@ class TaskSchedulerWorkerStore(SQLBaseStore):
         self,
         *,
         actions: Optional[List[str]] = None,
-        resource_ids: Optional[List[str]] = None,
+        resource_id: Optional[str] = None,
         statuses: Optional[List[TaskStatus]] = None,
         max_timestamp: Optional[int] = None,
     ) -> List[ScheduledTask]:
         """Get a list of scheduled tasks from the DB.
 
-        If an arg is `None` all tasks matching the other args will be selected.
-        If an arg is an empty list, the value needs to be NULL in DB to be selected.
-
         Args:
             actions: Limit the returned tasks to those specific action names
-            resource_ids: Limit the returned tasks to thoe specific resource ids
-            statuses: Limit the returned tasks to thoe specific statuses
+            resource_id: Limit the returned tasks to the specific resource id, if specified
+            statuses: Limit the returned tasks to the specific statuses
+            max_timestamp: Limit the returned tasks to the ones that have
+                a timestamp inferior to the specified one
 
-        Returns: a list of `ScheduledTask`
+        Returns: a list of `ScheduledTask`, ordered by increasing timestamps
         """
 
         def get_scheduled_tasks_txn(txn: LoggingTransaction) -> List[Dict[str, Any]]:
-            clauses = []
-            args = []
+            clauses: List[str] = []
+            args: List[Any] = []
+            if resource_id:
+                clauses.append("resource_id = ?")
+                args.append(resource_id)
             if actions is not None:
                 clause, temp_args = make_in_list_sql_clause(
                     txn.database_engine, "action", actions
-                )
-                clauses.append(clause)
-                args.extend(temp_args)
-            if resource_ids is not None:
-                clause, temp_args = make_in_list_sql_clause(
-                    txn.database_engine, "resource_id", resource_ids
                 )
                 clauses.append(clause)
                 args.extend(temp_args)
@@ -97,6 +92,8 @@ class TaskSchedulerWorkerStore(SQLBaseStore):
             if clauses:
                 sql = sql + " WHERE " + " AND ".join(clauses)
 
+            sql = sql + "ORDER BY timestamp"
+
             txn.execute(sql, args)
             return self.db_pool.cursor_to_dict(txn)
 
@@ -105,16 +102,16 @@ class TaskSchedulerWorkerStore(SQLBaseStore):
         )
         return [TaskSchedulerWorkerStore._convert_row_to_task(row) for row in rows]
 
-    async def upsert_scheduled_task(self, task: ScheduledTask) -> None:
-        """Upsert a specified `ScheduledTask` in the DB.
+    async def insert_scheduled_task(self, task: ScheduledTask) -> None:
+        """Insert a specified `ScheduledTask` in the DB.
 
         Args:
-            task: the `ScheduledTask` to upsert
+            task: the `ScheduledTask` to insert
         """
-        await self.db_pool.simple_upsert(
+        await self.db_pool.simple_insert(
             "scheduled_tasks",
-            {"id": task.id},
             {
+                "id": task.id,
                 "action": task.action,
                 "status": task.status,
                 "timestamp": task.timestamp,
@@ -127,14 +124,14 @@ class TaskSchedulerWorkerStore(SQLBaseStore):
                 else json_encoder.encode(task.result),
                 "error": task.error,
             },
-            desc="upsert_scheduled_task",
+            desc="insert_scheduled_task",
         )
 
     async def update_scheduled_task(
         self,
         id: str,
+        timestamp: int,
         *,
-        timestamp: Optional[int] = None,
         status: Optional[TaskStatus] = None,
         result: Optional[JsonMapping] = None,
         error: Optional[str] = None,
@@ -147,14 +144,14 @@ class TaskSchedulerWorkerStore(SQLBaseStore):
             status: new status of the task
             result: new result of the task
             error: new error of the task
+
+        Returns: `False` if no matching row was found, `True` otherwise
         """
-        updatevalues: JsonDict = {}
-        if timestamp is not None:
-            updatevalues["timestamp"] = timestamp
+        updatevalues: JsonDict = {"timestamp": timestamp}
         if status is not None:
             updatevalues["status"] = status
         if result is not None:
-            updatevalues["result"] = json.dumps(result)
+            updatevalues["result"] = json_encoder.encode(result)
         if error is not None:
             updatevalues["error"] = error
         nb_rows = await self.db_pool.simple_update(

@@ -29,6 +29,7 @@ class TestTaskScheduler(unittest.HomeserverTestCase):
     def prepare(self, reactor: MemoryReactor, clock: Clock, hs: HomeServer) -> None:
         self.task_scheduler = hs.get_task_scheduler()
         self.task_scheduler.register_action(self._test_task, "_test_task")
+        self.task_scheduler.register_action(self._sleeping_task, "_sleeping_task")
         self.task_scheduler.register_action(self._raising_task, "_raising_task")
         self.task_scheduler.register_action(self._resumable_task, "_resumable_task")
 
@@ -44,7 +45,7 @@ class TestTaskScheduler(unittest.HomeserverTestCase):
     def test_schedule_task(self) -> None:
         """Schedule a task in the future with some parameters to be copied as a result and check it executed correctly.
         Also check that it get removed after `KEEP_TASKS_FOR_MS`."""
-        timestamp = self.clock.time_msec() + 2 * 60 * 1000
+        timestamp = self.clock.time_msec() + 30 * 1000
         task_id = self.get_success(
             self.task_scheduler.schedule_task(
                 "_test_task",
@@ -58,9 +59,9 @@ class TestTaskScheduler(unittest.HomeserverTestCase):
         self.assertEqual(task.status, TaskStatus.SCHEDULED)
         self.assertIsNone(task.result)
 
-        # The timestamp being 2mn after now the task should been executed
+        # The timestamp being 30s after now the task should been executed
         # after the first scheduling loop is run
-        self.reactor.advance((TaskScheduler.SCHEDULE_INTERVAL_MS / 1000) + 1)
+        self.reactor.advance(TaskScheduler.SCHEDULE_INTERVAL_MS / 1000)
 
         task = self.get_success(self.task_scheduler.get_task(task_id))
         assert task is not None
@@ -75,26 +76,77 @@ class TestTaskScheduler(unittest.HomeserverTestCase):
         task = self.get_success(self.task_scheduler.get_task(task_id))
         self.assertIsNone(task)
 
-    def test_schedule_task_now(self) -> None:
-        """Schedule a task now and check it runs fine to completion."""
-        task_id = self.get_success(
-            self.task_scheduler.schedule_task("_test_task", params={"val": 1})
+    async def _sleeping_task(
+        self, task: ScheduledTask, first_launch: bool
+    ) -> Tuple[TaskStatus, Optional[JsonMapping], Optional[str]]:
+        # Sleep for a second
+        await deferLater(self.reactor, 1, lambda: None)
+        return TaskStatus.COMPLETE, None, None
+
+    def test_schedule_lot_of_tasks(self) -> None:
+        """Schedule more than `TaskScheduler.MAX_CONCURRENT_RUNNING_TASKS` tasks and check the behavior."""
+        timestamp = self.clock.time_msec() + 30 * 1000
+        task_ids = []
+        for i in range(TaskScheduler.MAX_CONCURRENT_RUNNING_TASKS + 1):
+            task_ids.append(
+                self.get_success(
+                    self.task_scheduler.schedule_task(
+                        "_sleeping_task",
+                        timestamp=timestamp,
+                        params={"val": i},
+                    )
+                )
+            )
+
+        # The timestamp being 30s after now the task should been executed
+        # after the first scheduling loop is run
+        self.reactor.advance((TaskScheduler.SCHEDULE_INTERVAL_MS / 1000))
+
+        # This is to give the time to the sleeping tasks to finish
+        self.reactor.advance(1)
+
+        # Check that only MAX_CONCURRENT_RUNNING_TASKS tasks has run and that one
+        # is still scheduled.
+        tasks = [
+            self.get_success(self.task_scheduler.get_task(task_id))
+            for task_id in task_ids
+        ]
+
+        self.assertEquals(
+            len(
+                [t for t in tasks if t is not None and t.status == TaskStatus.COMPLETE]
+            ),
+            TaskScheduler.MAX_CONCURRENT_RUNNING_TASKS,
         )
 
-        task = self.get_success(self.task_scheduler.get_task(task_id))
-        assert task is not None
-        self.assertEqual(task.status, TaskStatus.COMPLETE)
-        assert task.result is not None
-        self.assertTrue(task.result.get("val") == 1)
+        scheduled_tasks = [
+            t for t in tasks if t is not None and t.status == TaskStatus.SCHEDULED
+        ]
+        self.assertEquals(len(scheduled_tasks), 1)
+
+        self.reactor.advance((TaskScheduler.SCHEDULE_INTERVAL_MS / 1000))
+        self.reactor.advance(1)
+
+        # Check that the last task has been properly executed after the next scheduler loop run
+        prev_scheduled_task = self.get_success(
+            self.task_scheduler.get_task(scheduled_tasks[0].id)
+        )
+        assert prev_scheduled_task is not None
+        self.assertEquals(
+            prev_scheduled_task.status,
+            TaskStatus.COMPLETE,
+        )
 
     async def _raising_task(
         self, task: ScheduledTask, first_launch: bool
     ) -> Tuple[TaskStatus, Optional[JsonMapping], Optional[str]]:
         raise Exception("raising")
 
-    def test_schedule_raising_task_now(self) -> None:
+    def test_schedule_raising_task(self) -> None:
         """Schedule a task raising an exception and check it runs to failure and report exception content."""
         task_id = self.get_success(self.task_scheduler.schedule_task("_raising_task"))
+
+        self.reactor.advance((TaskScheduler.SCHEDULE_INTERVAL_MS / 1000))
 
         task = self.get_success(self.task_scheduler.get_task(task_id))
         assert task is not None
@@ -109,13 +161,15 @@ class TestTaskScheduler(unittest.HomeserverTestCase):
         else:
             await self.task_scheduler.update_task(task.id, result={"in_progress": True})
             # Await forever to simulate an aborted task because of a restart
-            await deferLater(self.reactor, 2**16, None)
+            await deferLater(self.reactor, 2**16, lambda: None)
             # This should never been called
             return TaskStatus.ACTIVE, None, None
 
-    def test_schedule_resumable_task_now(self) -> None:
+    def test_schedule_resumable_task(self) -> None:
         """Schedule a resumable task and check that it gets properly resumed and complete after simulating a synapse restart."""
         task_id = self.get_success(self.task_scheduler.schedule_task("_resumable_task"))
+
+        self.reactor.advance((TaskScheduler.SCHEDULE_INTERVAL_MS / 1000))
 
         task = self.get_success(self.task_scheduler.get_task(task_id))
         assert task is not None
@@ -123,7 +177,7 @@ class TestTaskScheduler(unittest.HomeserverTestCase):
 
         # Simulate a synapse restart by emptying the list of running tasks
         self.task_scheduler._running_tasks = set()
-        self.reactor.advance((TaskScheduler.SCHEDULE_INTERVAL_MS / 1000) + 1)
+        self.reactor.advance((TaskScheduler.SCHEDULE_INTERVAL_MS / 1000))
 
         task = self.get_success(self.task_scheduler.get_task(task_id))
         assert task is not None

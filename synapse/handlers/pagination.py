@@ -21,7 +21,7 @@ from synapse.api.constants import Direction, EventTypes, Membership
 from synapse.api.errors import SynapseError
 from synapse.api.filtering import Filter
 from synapse.events.utils import SerializeEventConfig
-from synapse.handlers.room import ShutdownRoomParams
+from synapse.handlers.worker_lock import NEW_EVENT_DURING_PURGE_LOCK_NAME
 from synapse.logging.opentracing import trace
 from synapse.metrics.background_process_metrics import run_as_background_process
 from synapse.rest.admin._base import assert_user_is_admin
@@ -50,6 +50,12 @@ logger = logging.getLogger(__name__)
 BACKFILL_BECAUSE_TOO_MANY_GAPS_THRESHOLD = 3
 
 
+# This is used to avoid purging a room several time at the same moment,
+# and also paginating during a purge. Pagination can trigger backfill,
+# which would create old events locally, and would potentially clash with the room delete.
+PURGE_PAGINATION_LOCK_NAME = "purge_pagination_lock"
+
+
 class PaginationHandler:
     """Handles pagination and purge history requests.
 
@@ -67,6 +73,7 @@ class PaginationHandler:
         self._server_name = hs.hostname
         self._room_shutdown_handler = hs.get_room_shutdown_handler()
         self._relations_handler = hs.get_relations_handler()
+        self._worker_locks = hs.get_worker_locks_handler()
         self._task_scheduler = hs.get_task_scheduler()
 
         self.pagination_lock = ReadWriteLock()
@@ -291,7 +298,9 @@ class PaginationHandler:
                 will be relaunch by the retention logic.
         """
         try:
-            async with self.pagination_lock.write(room_id):
+            async with self._worker_locks.acquire_read_write_lock(
+                PURGE_PAGINATION_LOCK_NAME, room_id, write=True
+            ):
                 await self._storage_controllers.purge_events.purge_history(
                     room_id, token, delete_local_events
                 )
@@ -320,7 +329,7 @@ class PaginationHandler:
             room_id: room_id that is deleted
         """
         return await self._task_scheduler.get_tasks(
-            actions=["purge_room", "shutdown_and_purge_room"], resource_ids=[room_id]
+            actions=["purge_room", "shutdown_and_purge_room"], resource_id=room_id
         )
 
     async def _purge_room(
@@ -352,7 +361,13 @@ class PaginationHandler:
         """
         logger.info("starting purge room_id=%s force=%s", room_id, force)
 
-        async with self.pagination_lock.write(room_id):
+        async with self._worker_locks.acquire_multi_read_write_lock(
+            [
+                (PURGE_PAGINATION_LOCK_NAME, room_id),
+                (NEW_EVENT_DURING_PURGE_LOCK_NAME, room_id),
+            ],
+            write=True,
+        ):
             # first check that we have no users in this room
             joined = await self.store.is_host_joined(room_id, self._server_name)
             if joined:
@@ -418,7 +433,9 @@ class PaginationHandler:
 
         room_token = from_token.room_key
 
-        async with self.pagination_lock.read(room_id):
+        async with self._worker_locks.acquire_read_write_lock(
+            PURGE_PAGINATION_LOCK_NAME, room_id, write=False
+        ):
             (membership, member_event_id) = (None, None)
             if not use_admin_priviledge:
                 (
@@ -676,20 +693,20 @@ class PaginationHandler:
     async def get_current_delete_tasks(self, room_id: str) -> List[ScheduledTask]:
         return await self._task_scheduler.get_tasks(
             actions=["purge_history", "purge_room", "shutdown_and_purge_room"],
-            resource_ids=[room_id],
+            resource_id=room_id,
             statuses=[TaskStatus.ACTIVE, TaskStatus.SCHEDULED],
         )
 
     async def start_shutdown_and_purge_room(
         self,
         room_id: str,
-        shutdown_params: ShutdownRoomParams,
+        shutdown_params: JsonMapping,
     ) -> str:
         """Start off shut down and purge on a room.
 
         Args:
             room_id: The ID of the room to shut down.
-            shutdown_params: parameters for the shutdown, cf `RoomShutdownHandler.ShutdownRoomParams`
+            shutdown_params: parameters for the shutdown
 
         Returns:
             unique ID for this delete transaction.

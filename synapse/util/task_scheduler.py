@@ -15,6 +15,8 @@
 import logging
 from typing import TYPE_CHECKING, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
+from prometheus_client import Gauge
+
 from twisted.python.failure import Failure
 
 from synapse.metrics.background_process_metrics import run_as_background_process
@@ -27,18 +29,59 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+running_tasks_gauge = Gauge(
+    "synapse_scheduler_running_tasks",
+    "The number of concurrent running tasks handled by the TaskScheduler",
+)
+
+
 class TaskScheduler:
+    """
+    This is a simple task sheduler aimed at resumable tasks: usually we use `run_in_background`
+    to launch a background task, or Twisted `deferLater` if we want to do so later on.
+
+    The problem with that is that the tasks will just stop and never be resumed if synapse
+    is stopped for whatever reason.
+
+    How this works:
+    - A function mapped to a named action should first be registered with `register_action`.
+    This function will be called when trying to resuming tasks after a synapse shutdown,
+    so this registration should happen when synapse is initialised, NOT right before scheduling
+    a task.
+    - A task can then be launched using this named action with `schedule_task`. A `params` dict
+    can be passed, and it will be available to the registered function when launched. This task
+    can be launch either now-ish, or later on by giving a `timestamp` parameter.
+
+    The function may call `update_task` at any time to update the `result` of the task,
+    and this can be used to resume the task at a specific point and/or to convey a result to
+    the code launching the task.
+    You can also specify the `result` (and/or an `error`) when returning from the function.
+
+    The reconciliation loop runs every 5 mns, so this is not a precise scheduler. When wanting
+    to launch now, the launch will still not happen before the next loop run.
+
+    Tasks will be run on the worker specified with `run_background_tasks_on` config,
+    or the main one by default.
+    There is a limit of 10 concurrent tasks, so tasks may be delayed if the pool is already
+    full. In this regard, please take great care that scheduled tasks can actually finished.
+    For now there is no mechanism to stop a running task if it is stuck.
+    """
+
     # Precision of the scheduler, evaluation of tasks to run will only happen
     # every `SCHEDULE_INTERVAL_MS` ms
-    SCHEDULE_INTERVAL_MS = 5 * 60 * 1000  # 5mn
-    CLEAN_INTERVAL_MS = 60 * 60 * 1000  # 1hr
+    SCHEDULE_INTERVAL_MS = 1 * 60 * 1000  # 1mn
     # Time before a complete or failed task is deleted from the DB
     KEEP_TASKS_FOR_MS = 7 * 24 * 60 * 60 * 1000  # 1 week
+    # Maximum number of tasks that can run at the same time
+    MAX_CONCURRENT_RUNNING_TASKS = 10
+    # Time from the last task update after which we will log a warning
+    LAST_UPDATE_BEFORE_WARNING_MS = 24 * 60 * 60 * 1000  # 24hrs
 
     def __init__(self, hs: "HomeServer"):
         self._store = hs.get_datastores().main
         self._clock = hs.get_clock()
         self._running_tasks: Set[str] = set()
+        # A map between action names and their registered function
         self._actions: Dict[
             str,
             Callable[
@@ -52,14 +95,8 @@ class TaskScheduler:
             self._clock.looping_call(
                 run_as_background_process,
                 TaskScheduler.SCHEDULE_INTERVAL_MS,
-                "run_scheduled_tasks",
-                self._run_scheduled_tasks,
-            )
-            self._clock.looping_call(
-                run_as_background_process,
-                TaskScheduler.CLEAN_INTERVAL_MS,
-                "clean_scheduled_tasks",
-                self._clean_scheduled_tasks,
+                "handle_scheduled_tasks",
+                self._handle_scheduled_tasks,
             )
 
     def register_action(
@@ -102,10 +139,10 @@ class TaskScheduler:
             action: the name of a previously registered action
             resource_id: a task can be associated with a resource id to facilitate
                 getting all tasks associated with a specific resource
-            timestamp: if `None`, the task will be launched immediately, otherwise it
-                will be launch after the `timestamp` value. Note that this scheduler
-                is not meant to be precise, and the scheduling could be delayed if
-                too many tasks are already running
+            timestamp: if `None`, the task will be launched as soon as possible, otherwise it
+                will be launch as soon as possible after the `timestamp` value.
+                Note that this scheduler is not meant to be precise, and the scheduling
+                could be delayed if too many tasks are already running
             params: a set of parameters that can be easily accessed from inside the
                 executed function
 
@@ -117,10 +154,8 @@ class TaskScheduler:
                 f"No function associated with action {action} of the scheduled task"
             )
 
-        launch_now = False
         if timestamp is None or timestamp < self._clock.time_msec():
             timestamp = self._clock.time_msec()
-            launch_now = True
 
         task = ScheduledTask(
             random_string(16),
@@ -129,13 +164,10 @@ class TaskScheduler:
             timestamp,
             resource_id,
             params,
-            None,
-            None,
+            result=None,
+            error=None,
         )
-        await self._store.upsert_scheduled_task(task)
-
-        if launch_now and self._run_background_tasks:
-            await self._launch_task(task, True)
+        await self._store.insert_scheduled_task(task)
 
         return task.id
 
@@ -148,22 +180,33 @@ class TaskScheduler:
         result: Optional[JsonMapping] = None,
         error: Optional[str] = None,
     ) -> bool:
-        """Update some task associated values.
+        """Update some task associated values. This is exposed publically so it can
+        be used inside task functions, mainly to update the result and be able to
+        resume a task at a specific step after a restart of synapse.
 
-        This is used internally, and also exposed publically so it can be used inside task functions.
-        This allows to store in DB the progress of a task so it can be resumed properly after a restart of synapse.
+        It can also be used to stage a task, by setting the `status` to `SCHEDULED` with
+        a new timestamp.
+
+        The `status` can only be set to `ACTIVE` or `SCHEDULED`, `COMPLETE` and `FAILED`
+        are terminal status and can only be set by returning it in the function.
 
         Args:
             id: the id of the task to update
+            timestamp: useful to schedule a new stage of the task at a later date
             status: the new `TaskStatus` of the task
             result: the new result of the task
             error: the new error of the task
         """
+        if status == TaskStatus.COMPLETE or status == TaskStatus.FAILED:
+            raise Exception(
+                "update_task can't be called with a FAILED or COMPLETE status"
+            )
+
         if timestamp is None:
             timestamp = self._clock.time_msec()
         return await self._store.update_scheduled_task(
             id,
-            timestamp=timestamp,
+            timestamp,
             status=status,
             result=result,
             error=error,
@@ -185,50 +228,102 @@ class TaskScheduler:
         self,
         *,
         actions: Optional[List[str]] = None,
-        resource_ids: Optional[List[str]] = None,
+        resource_id: Optional[str] = None,
         statuses: Optional[List[TaskStatus]] = None,
         max_timestamp: Optional[int] = None,
     ) -> List[ScheduledTask]:
-        """Get a list of tasks associated with some action name(s) and/or
-        with some resource id(s).
+        """Get a list of tasks. Returns all the tasks if no args is provided.
+
+        If an arg is `None` all tasks matching the other args will be selected.
+        If an arg is an empty list, the corresponding value of the task needs
+        to be `None` to be selected.
 
         Args:
-            action: the action name of the tasks to retrieve
-            resource_id: if `None`, returns all associated tasks for
-                the specified action name, regardless of the resource id
+            actions: Limit the returned tasks to those specific action names
+            resource_id: Limit the returned tasks to the specific resource id, if specified
+            statuses: Limit the returned tasks to the specific statuses
+            max_timestamp: Limit the returned tasks to the ones that have
+                a timestamp inferior to the specified one
 
         Returns
-            A list of `ScheduledTask`
+            A list of `ScheduledTask`, ordered by increasing timestamps
         """
         return await self._store.get_scheduled_tasks(
             actions=actions,
-            resource_ids=resource_ids,
+            resource_id=resource_id,
             statuses=statuses,
             max_timestamp=max_timestamp,
         )
 
-    async def _run_scheduled_tasks(self) -> None:
-        """Main loop taking care of launching the scheduled tasks when needed."""
+    async def delete_task(self, id: str) -> None:
+        """Delete a task. Running tasks can't be deleted.
+
+        Can only be called from the worker handling the task scheduling.
+
+        Args:
+            id: id of the task to delete
+        """
+        if self.task_is_running(id):
+            raise Exception(f"Task {id} is currently running and can't be deleted")
+        await self._store.delete_scheduled_task(id)
+
+    def task_is_running(self, id: str) -> bool:
+        """Check if a task is currently running.
+
+        Can only be called from the worker handling the task scheduling.
+
+        Args:
+            id: id of the task to check
+        """
+        assert self._run_background_tasks
+        return id in self._running_tasks
+
+    async def _handle_scheduled_tasks(self) -> None:
+        """Main loop taking care of launching tasks and cleaning up old ones."""
+        await self._launch_scheduled_tasks()
+        await self._clean_scheduled_tasks()
+
+    async def _launch_scheduled_tasks(self) -> None:
+        """Retrieve and launch scheduled tasks that should be running at that time."""
         for task in await self.get_tasks(statuses=[TaskStatus.ACTIVE]):
-            if task.id not in self._running_tasks:
-                await self._launch_task(task, first_launch=False)
+            if not self.task_is_running(task.id):
+                if (
+                    len(self._running_tasks)
+                    < TaskScheduler.MAX_CONCURRENT_RUNNING_TASKS
+                ):
+                    await self._launch_task(task, first_launch=False)
+            else:
+                if (
+                    self._clock.time_msec()
+                    > task.timestamp + TaskScheduler.LAST_UPDATE_BEFORE_WARNING_MS
+                ):
+                    logger.warn(
+                        f"Task {task.id} (action {task.action}) has seen no update for more than 24h and may be stuck"
+                    )
         for task in await self.get_tasks(
             statuses=[TaskStatus.SCHEDULED], max_timestamp=self._clock.time_msec()
         ):
-            if task.id not in self._running_tasks:
+            if (
+                not self.task_is_running(task.id)
+                and len(self._running_tasks)
+                < TaskScheduler.MAX_CONCURRENT_RUNNING_TASKS
+            ):
                 await self._launch_task(task, first_launch=True)
 
+        running_tasks_gauge.set(len(self._running_tasks))
+
     async def _clean_scheduled_tasks(self) -> None:
-        """Clean loop taking care of removing old complete or failed jobs to avoid clutter the DB."""
+        """Clean old complete or failed jobs to avoid clutter the DB."""
         for task in await self._store.get_scheduled_tasks(
             statuses=[TaskStatus.FAILED, TaskStatus.COMPLETE]
         ):
-            if task.id not in self._running_tasks:
-                if (
-                    self._clock.time_msec()
-                    > task.timestamp + TaskScheduler.KEEP_TASKS_FOR_MS
-                ):
-                    await self._store.delete_scheduled_task(task.id)
+            # FAILED and COMPLETE tasks should never be running
+            assert not self.task_is_running(task.id)
+            if (
+                self._clock.time_msec()
+                > task.timestamp + TaskScheduler.KEEP_TASKS_FOR_MS
+            ):
+                await self._store.delete_scheduled_task(task.id)
 
     async def _launch_task(self, task: ScheduledTask, first_launch: bool) -> None:
         """Launch a scheduled task now.
@@ -237,11 +332,7 @@ class TaskScheduler:
             task: the task to launch
             first_launch: `True` if it's the first time is launched, `False` otherwise
         """
-        if task.action not in self._actions:
-            logger.warn(
-                f"Can't launch task {task.id} since no function associated with action {task.action}"
-            )
-            return
+        assert task.action in self._actions
 
         function = self._actions[task.action]
 
@@ -258,15 +349,16 @@ class TaskScheduler:
                 result = None
                 error = f.getErrorMessage()
 
-            await self.update_task(
+            await self._store.update_scheduled_task(
                 task.id,
+                self._clock.time_msec(),
                 status=status,
                 result=result,
                 error=error,
             )
             self._running_tasks.remove(task.id)
 
-        await self.update_task(task.id, status=TaskStatus.ACTIVE)
         self._running_tasks.add(task.id)
+        await self.update_task(task.id, status=TaskStatus.ACTIVE)
         description = f"{task.id}-{task.action}"
         run_as_background_process(description, wrapper)
